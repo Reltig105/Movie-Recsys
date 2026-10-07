@@ -1,21 +1,24 @@
 import io
 import os
-import urllib.request
+import requests
 import zipfile
+import urllib3
 
-DATA_URL = "https://files.grouplens.org/datasets/movielens/ml-100k.zip"
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+DATA_URL = "http://files.grouplens.org/datasets/movielens/ml-100k.zip"
 TARGET_DIR = os.path.join("ml", "data")
 def download_and_extract_movielens() -> None:
     os.makedirs(TARGET_DIR, exist_ok=True)
     extract_path = os.path.join(TARGET_DIR, "ml-100k")
-    
+
     if os.path.exists(extract_path):
         print(f"Датасет уже скачан и распакован: {extract_path}")
         return 
     
     print(f"Началась загрузка датасета по ссылке: {DATA_URL}")
-    response = urllib.request.urlopen(DATA_URL)
-    zip_buffer = io.BytesIO(response.read())
+    response = requests.get(DATA_URL, timeout=30, verify=False)
+    response.raise_for_status()
+    zip_buffer = io.BytesIO(response.content)
 
     print("Распаковка архива...")
     with zipfile.ZipFile(zip_buffer) as archive:
