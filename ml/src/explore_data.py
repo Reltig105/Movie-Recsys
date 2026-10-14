@@ -9,6 +9,9 @@ def load_ratings() -> pd.DataFrame:
     df = pd.read_csv(DATA_PATH, sep="\t", names=COLUMNS)
     return df
 
+#  sparcity = (1 - |R| / (|U| * |I|)) * 100%
+#  R - число выставленных оценок, U - число пользователей,
+#  I - число фильмов; nunique - возвращает колво уникальн элементов  
 def calculate_sparsity(df: pd.DataFrame) -> float:
     n_users = df["user_id"].nunique()
     n_items = df["item_id"].nunique()
