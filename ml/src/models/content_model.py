@@ -17,15 +17,19 @@ def transform_df() -> tuple:
     df = pd.read_csv("ml/data/interim/tmdb_features.csv")
     df["overview"] = df["overview"].fillna("")
 
+    #  обучение и векторизауия 
     custom_stops = ["фильм", "кино", "сюжет", "энди"]
     all_stop_words = stopwords.words("russian") + custom_stops
     
     vectorizer = TfidfVectorizer(
         stop_words=all_stop_words,
-        ngram_range=(1,2), # Учитываем не только слова, но и пары слов (биграммы)
-        min_df=2, # Слово должно встретиться минимум в 2 фильмах
+        # Учитываем не только слова, но и пары слов (биграммы)
+        ngram_range=(1,2),
+        # Слово должно встретиться минимум в 2 фильмах
+        min_df=2, 
         max_df=0.7,
-        sublinear_tf=True # Заменяет TF на 1 + log(TF), сглаживая пики
+        # Заменяет TF на 1 + log(TF), сглаживая пики
+        sublinear_tf=True 
     )
 
     tfidf_matrix = vectorizer.fit_transform(df["overview"])
