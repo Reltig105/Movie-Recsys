@@ -4,9 +4,12 @@ from ml.src.config import PROCESSED_DATA_DIR, TRAIN_PATH, TEST_PATH
 
 def temporal_train_test_split(df: pd.DataFrame, test_ratio: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = df.sort_values(by=["user_id", "timestamp"]).copy()
+    #  cumcount - нумерует строки каждого пользователя по порядку
     df["rank"] = df.groupby("user_id").cumcount()
+    #  transform("count") - общее кол-во оценок у каждого user
     df["total"] = df.groupby("user_id")["timestamp"].transform("count")
 
+    # первые 80% -> train, 20% -> test
     train_mask = df["rank"] < df["total"] *(1-test_ratio)
     train_df = df[train_mask].drop(columns=["rank", "total"])
     test_df = df[~train_mask].drop(columns=["rank", "total"])
@@ -14,6 +17,8 @@ def temporal_train_test_split(df: pd.DataFrame, test_ratio: float = 0.2) -> tupl
     return train_df, test_df
 
 def save_splits(train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
+    # Path.mkdir гарантирует создание директории ml/data/processed/,
+    #  если её еще нет, без падений
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok = True)
     train_df.to_csv(TRAIN_PATH, index=False)
     test_df.to_csv(TEST_PATH, index=False)
