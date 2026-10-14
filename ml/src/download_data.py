@@ -4,6 +4,9 @@ import requests
 import zipfile
 import urllib3
 
+#  На серверах GroupLens старый HTTP-сертификат часто вызывает
+#  предупреждения безопасности.Эта строчка отключает вывод
+#  спам-варнингов
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 DATA_URL = "http://files.grouplens.org/datasets/movielens/ml-100k.zip"
 TARGET_DIR = os.path.join("ml", "data")
