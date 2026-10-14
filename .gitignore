@@ -9,4 +9,6 @@ data/
 ml/data/
 *.zip
 .vscode/
+ml/artifacts/*.npyml/artifacts/*.npy
+ml/artifacts/*.npy
 ml/artifacts/*.npy
