@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+# в дальнейшем добавяться метрики ранжировки: HitRate@K и NDCG@K
 def calculate_rmse(y_true: np.ndarray | pd.Series, y_pred: np.ndarray | pd.Series) -> float:
     rmse = float(np.sqrt(np.mean((y_true - y_pred) **2)))
     return rmse
