@@ -55,10 +55,54 @@ def _get_recommend_fn() -> RecommendFn:
     return model.recommend
 
 
+@lru_cache(maxsize=1)
+def _get_movie_catalog() -> dict[int, str]:
+    """Загрузить каталог ``{item_id: title}`` и закэшировать его.
+
+    Источник — метаданные MovieLens (``ml/src/explore_data.load_movies``).
+    При ошибке (данных нет) возвращает пустой словарь, чтобы API не падал.
+    """
+    try:
+        from ml.src.explore_data import load_movies
+
+        movies = load_movies().set_index("item_id")["title"]
+        return {int(item_id): str(title) for item_id, title in movies.items()}
+    except Exception:  # noqa: BLE001 - каталог не критичен для работы API
+        return {}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     """Простейший health-check для мониторинга и фронтенда."""
     return {"status": "ok"}
+
+
+@app.get("/movies")
+def list_movies(
+    item_ids: str | None = Query(
+        None,
+        description="Необязательный список item_id через запятую, например '100,475'",
+    ),
+) -> dict[str, Any]:
+    """Вернуть каталог фильмов вида ``{"movies": [{"item_id": .., "title": ..}, ...]}``.
+
+    Если передан ``item_ids`` — возвращаются только запрошенные фильмы (для тех,
+    которых нет в каталоге, подставляется ``"Movie ID <id>"``). Иначе — весь каталог.
+    """
+    catalog = _get_movie_catalog()
+
+    if item_ids:
+        requested = []
+        for chunk in item_ids.split(","):
+            chunk = chunk.strip()
+            if chunk.lstrip("-").isdigit():
+                requested.append(int(chunk))
+        titles = {item_id: catalog.get(item_id, f"Movie ID {item_id}") for item_id in requested}
+    else:
+        titles = catalog
+
+    movies = [{"item_id": item_id, "title": title} for item_id, title in titles.items()]
+    return {"count": len(movies), "movies": movies}
 
 
 @app.get("/recommend")
