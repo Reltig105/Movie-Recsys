@@ -3,112 +3,143 @@
 Запуск:
     streamlit run app.py
 
-Сейчас данные берутся из заглушки ``mock_recommend``. Точка интеграции с
-реальной SVD-моделью помечена в коде ниже (см. блок TODO и пометки
-"ЗАМЕНИТЬ ЗДЕСЬ").
+Модуль умеет работать в двух режимах:
+    1) с реальной моделью — если удалось импортировать ``recommend``;
+    2) с mock-заглушкой — если модуля модели ещё нет (см. ``mock_recommend``).
 """
 
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import streamlit as st
 
 # =============================================================================
-# TODO: ТОЧКА ИНТЕГРАЦИИ С РЕАЛЬНОЙ МОДЕЛЬЮ.
+# 👇 ДЛЯ ML-ИНЖЕНЕРА: СЮДА ПОДЦЕПИТЬ РЕАЛЬНЫЕ НАЗВАНИЯ ФИЛЬМОВ.
 #
-# Сейчас используется заглушка ``mock_recommend``. Чтобы подключить настоящую
-# SVD-модель из ml/src/models/svd_model.py:
+# Сейчас модель может вернуть "голые" item_id (int). Чтобы показывать названия,
+# заполните этот словарь ``{item_id: title}`` — например, загрузив его из
+# ml/src/explore_data.py (load_movies) или из ml/data/interim/tmdb_features.csv:
 #
-#   1) Раскомментируйте блок ниже.
-#   2) В main() замените вызов mock_recommend(...) на get_recommendations(...)
-#      (там стоит пометка "ЗАМЕНИТЬ ЗДЕСЬ").
+#     from ml.src.explore_data import load_movies
+#     MOVIE_TITLES = load_movies().set_index("item_id")["title"].to_dict()
 #
-# -----------------------------------------------------------------------------
-# from ml.src.models.svd_model import SVDRecommender, load_train_ratings
-#
-#
-# @st.cache_resource
-# def load_recommender() -> SVDRecommender:
-#     """Обучить модель один раз и закэшировать между перезапусками интерфейса."""
-#     model = SVDRecommender(n_components=20, random_state=42)
-#     return model.fit(load_train_ratings())
-#
-#
-# def get_recommendations(user_id: int, top_k: int) -> list[int]:
-#     """Рекомендации для пользователя; возвращает список item_id (int)."""
-#     model = load_recommender()
-#     return model.recommend(user_id=user_id, top_k=top_k)
-# -----------------------------------------------------------------------------
-#
-# ВАЖНО: реальная модель вернёт список ``item_id`` (int), а не названия.
-# Чтобы показывать названия, сопоставьте id с тайтлами, например через
-# ``load_movies()`` из ml.src.explore_data, и передайте в render_recommendations()
-# уже список строк.
+# Пока словарь пуст, интерфейс покажет "Movie ID <id>".
 # =============================================================================
+MOVIE_TITLES: dict[int, str] = {
+    # Пример заполнения:
+    # 1: "Toy Story (1995)",
+    # 2: "Jumanji (1995)",
+}
+
+# Тип, который может вернуть модель: либо id (int), либо уже готовые названия (str).
+Recommendation = int | str
 
 
-def mock_recommend(user_id: int, top_k: int) -> list[str]:
-    """Заглушка вместо реальной модели.
+def _load_recommend_function() -> Callable[[int, int], list[Recommendation]] | None:
+    """Попытаться импортировать функцию рекомендаций ``recommend(user_id, top_k)``.
 
-    Возвращает ``top_k`` фейковых названий фильмов ("Movie A", "Movie B", ...).
-
-    Args:
-        user_id: Идентификатор пользователя (в заглушке не используется).
-        top_k: Количество рекомендаций.
+    Порядок попыток:
+        1. ``src.svd_model`` — путь из ТЗ;
+        2. ``ml.src.models.svd_model`` — фактическое расположение модуля в репо
+           (там это класс ``SVDRecommender``; обучаем его и берём метод ``recommend``).
 
     Returns:
-        Список названий фильмов длиной не более ``top_k``.
+        Функцию ``recommend`` или ``None``, если модель ещё не готова.
+    """
+    # --- Попытка 1: путь из ТЗ ---
+    try:
+        from src.svd_model import recommend as svd_recommend
+
+        return svd_recommend
+    except ImportError:
+        pass
+
+    # --- Попытка 2: реальный путь в этом репозитории ---
+    try:
+        from ml.src.models.svd_model import SVDRecommender, load_train_ratings
+
+        # Модель обучается один раз и кэшируется между перезапусками интерфейса.
+        @st.cache_resource(show_spinner="Обучаю SVD-модель...")
+        def _build() -> SVDRecommender:
+            return SVDRecommender(n_components=20, random_state=42).fit(load_train_ratings())
+
+        model = _build()
+        return model.recommend
+    except ImportError:
+        return None
+    except Exception:  # noqa: BLE001 - модель есть, но не удалось обучить/загрузить
+        return None
+
+
+def mock_recommend(user_id: int, top_k: int) -> list[Recommendation]:
+    """Заглушка на случай, если реальная модель пока недоступна.
+
+    Возвращает ``top_k`` фейковых названий фильмов ("Movie A", "Movie B", ...).
     """
     letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     return [f"Movie {letters[i]}" for i in range(min(top_k, len(letters)))]
 
 
-def render_recommendations(items: list[str]) -> None:
-    """Вывести рекомендации в виде карточек с нумерацией."""
+def resolve_for_display(item: Recommendation) -> str:
+    """Преобразовать элемент рекомендации в строку для отображения.
+
+    Args:
+        item: Либо ``item_id`` (int / строка-число), либо готовое название.
+
+    Returns:
+        Название фильма, если оно есть в ``MOVIE_TITLES``, иначе "Movie ID <id>".
+    """
+    # Если вернулся ID (int или строка из цифр) — пробуем найти название.
+    if isinstance(item, int) or (isinstance(item, str) and item.isdigit()):
+        item_id = int(item)
+        # 👇 Здесь словарь MOVIE_TITLES подставляет реальное название вместо ID.
+        return MOVIE_TITLES.get(item_id, f"Movie ID {item_id}")
+
+    # Уже название.
+    return str(item)
+
+
+def render_recommendations(items: list[Recommendation]) -> None:
+    """Отрисовать рекомендации в виде нумерованного списка."""
     if not items:
         st.warning("Рекомендации не найдены.")
         return
 
     st.subheader("Рекомендации")
-    for rank, title in enumerate(items, start=1):
-        with st.container(border=True):
-            st.markdown(f"**{rank}. {title}**")
+    for rank, item in enumerate(items, start=1):
+        st.write(f"**{rank}.** {resolve_for_display(item)}")
 
 
 def main() -> None:
-    st.set_page_config(
-        page_title="Movie Recommender System",
-        page_icon="🎬",
-        layout="centered",
-    )
-    st.title("Movie Recommender System")
+    st.set_page_config(page_title="Movie Recommendation System", page_icon="🎬", layout="centered")
+    st.title("Movie Recommendation System")
 
-    # --- Ввод данных ---
-    user_id = st.number_input("User ID", min_value=1, value=1, step=1)
-    top_k = st.slider(
-        "Количество рекомендаций (top_k)",
-        min_value=5,
-        max_value=20,
-        value=10,
-        step=1,
-    )
+    # --- Сайдбар с параметрами ---
+    with st.sidebar:
+        st.header("Параметры")
+        user_id = st.number_input("User ID", min_value=1, value=1, step=1)
+        top_k = st.slider("Количество рекомендаций (top_k)", min_value=5, max_value=20, value=10, step=1)
 
-    # --- Логика по нажатию кнопки ---
-    if st.button("Получить рекомендации", type="primary"):
+    # --- Кнопка в основной области ---
+    if st.button("Get Recommendations", type="primary"):
+        recommend_fn = _load_recommend_function()
+        if recommend_fn is None:
+            st.info("Модуль модели не найден — показываю демо-результаты (mock).")
+            recommend_fn = mock_recommend
+
         try:
-            # ЗАМЕНИТЬ ЗДЕСЬ: mock_recommend -> get_recommendations (реальная модель).
-            recommendations = mock_recommend(user_id=int(user_id), top_k=int(top_k))
-        except Exception as error:  # noqa: BLE001 - показываем любую ошибку в UI
+            items = recommend_fn(int(user_id), int(top_k))
+        except Exception as error:  # noqa: BLE001 - показываем любую ошибку прямо в UI
             st.error(f"Не удалось получить рекомендации: {error}")
         else:
-            # Сохраняем результат, чтобы он не исчезал при перерисовке страницы.
-            st.session_state["recommendations"] = recommendations
+            # Сохраняем, чтобы результат не исчезал при перерисовке страницы.
+            st.session_state["recommendations"] = list(items)
 
     # --- Вывод результатов ---
-    recommendations = st.session_state.get("recommendations")
-    if recommendations:
-        render_recommendations(recommendations)
-    elif recommendations == []:
-        st.warning("Рекомендации не найдены.")
+    results = st.session_state.get("recommendations")
+    if results is not None:
+        render_recommendations(results)
 
 
 if __name__ == "__main__":
