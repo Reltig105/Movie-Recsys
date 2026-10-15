@@ -15,22 +15,29 @@ from typing import Any, Callable
 import streamlit as st
 
 # =============================================================================
-# 👇 ДЛЯ ML-ИНЖЕНЕРА: СЮДА ПОДЦЕПИТЬ РЕАЛЬНЫЕ НАЗВАНИЯ ФИЛЬМОВ.
+# 👇 ДЛЯ ML-ИНЖЕНЕРА: НАЗВАНИЯ ФИЛЬМОВ (item_id -> title).
 #
-# Сейчас модель может вернуть "голые" item_id (int). Чтобы показывать названия,
-# заполните этот словарь ``{item_id: title}`` — например, загрузив его из
-# ml/src/explore_data.py (load_movies) или из ml/data/interim/tmdb_features.csv:
+# MOVIE_TITLES загружается автоматически из MovieLens (ml/src/explore_data.py).
+# Если данные недоступны — словарь пустой, и интерфейс покажет "Movie ID <id>".
 #
-#     from ml.src.explore_data import load_movies
-#     MOVIE_TITLES = load_movies().set_index("item_id")["title"].to_dict()
-#
-# Пока словарь пуст, интерфейс покажет "Movie ID <id>".
+# Хочешь другой источник (например, обогащённые TMDB-названия/постеры) — замени
+# тело _load_movie_titles, например:
+#     import pandas as pd
+#     return pd.read_csv("ml/data/interim/tmdb_features.csv") \
+#              .set_index("item_id")["title"].to_dict()
 # =============================================================================
-MOVIE_TITLES: dict[int, str] = {
-    # Пример заполнения:
-    # 1: "Toy Story (1995)",
-    # 2: "Jumanji (1995)",
-}
+def _load_movie_titles() -> dict[int, str]:
+    """Загрузить словарь ``{item_id: title}``. При ошибке вернуть пустой словарь."""
+    try:
+        from ml.src.explore_data import load_movies
+
+        movies = load_movies().set_index("item_id")["title"]
+        return {int(item_id): str(title) for item_id, title in movies.items()}
+    except Exception:  # noqa: BLE001 - данных может не быть, это не критично для UI
+        return {}
+
+
+MOVIE_TITLES: dict[int, str] = _load_movie_titles()
 
 # Тип, который может вернуть модель: либо id (int), либо уже готовые названия (str).
 Recommendation = int | str
