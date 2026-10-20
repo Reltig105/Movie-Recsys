@@ -134,6 +134,41 @@ function Profile({ userId = 1 }) {
     }
   }, [history.length])
 
+  // Колесо мыши над историей прокручивает её по горизонтали: иначе карусель
+  // приходится тянуть за ползунок. Слушатель нативный и не passive — в
+  // React-обработчике onWheel preventDefault() не срабатывает.
+  useEffect(() => {
+    const element = historyRef.current
+    if (!element) return undefined
+
+    const onWheel = (event) => {
+      // Горизонтальный жест трекпада браузер обрабатывает сам.
+      if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return
+
+      const max = Math.max(0, element.scrollWidth - element.clientWidth)
+      if (max === 0) return
+
+      const step =
+        event.deltaMode === 1
+          ? 24
+          : event.deltaMode === 2
+            ? element.clientWidth
+            : 1
+      const delta = event.deltaY * step
+
+      // На краю списка отдаём событие странице, иначе она не прокрутится.
+      const atStart = element.scrollLeft <= 0 && delta < 0
+      const atEnd = element.scrollLeft >= max - 1 && delta > 0
+      if (atStart || atEnd) return
+
+      event.preventDefault()
+      element.scrollLeft = Math.min(max, Math.max(0, element.scrollLeft + delta))
+    }
+
+    element.addEventListener('wheel', onWheel, { passive: false })
+    return () => element.removeEventListener('wheel', onWheel)
+  }, [history.length])
+
   const scrollPercent =
     scrollState.max > 0 ? (scrollState.value / scrollState.max) * 100 : 0
 
