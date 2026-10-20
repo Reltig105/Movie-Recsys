@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import api from '../api'
 
 const SLIDERS = [
@@ -74,6 +74,8 @@ function Profile({ userId = 1 }) {
   const [editingId, setEditingId] = useState(null)
   const [savingId, setSavingId] = useState(null)
   const [rateError, setRateError] = useState(null)
+  const historyRef = useRef(null)
+  const [scrollState, setScrollState] = useState({ value: 0, max: 0 })
   const [settings, setSettings] = useState({
     mood: 55,
     risk: 30,
@@ -104,6 +106,46 @@ function Profile({ userId = 1 }) {
   const percent = Math.min(100, Math.round((watched / WATCH_GOAL) * 100))
   const history = profile?.history ?? []
   const genres = profile?.favorite_genres ?? []
+
+  // Держим ползунок и горизонтальную прокрутку истории в синхроне.
+  useEffect(() => {
+    const element = historyRef.current
+    if (!element) return undefined
+
+    const sync = () => {
+      setScrollState({
+        value: element.scrollLeft,
+        max: Math.max(0, element.scrollWidth - element.clientWidth),
+      })
+    }
+
+    sync()
+    element.addEventListener('scroll', sync, { passive: true })
+
+    let observer
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(sync)
+      observer.observe(element)
+    }
+
+    return () => {
+      element.removeEventListener('scroll', sync)
+      observer?.disconnect()
+    }
+  }, [history.length])
+
+  const scrollPercent =
+    scrollState.max > 0 ? (scrollState.value / scrollState.max) * 100 : 0
+
+  const handleHistoryScroll = (event) => {
+    const element = historyRef.current
+    if (!element) return
+
+    const max = Math.max(0, element.scrollWidth - element.clientWidth)
+    const next = (Number(event.target.value) / 100) * max
+    element.scrollLeft = next
+    setScrollState({ value: next, max })
+  }
 
   const updateSetting = (id, value) =>
     setSettings((prev) => ({ ...prev, [id]: value }))
@@ -233,74 +275,94 @@ function Profile({ userId = 1 }) {
                 Пока нет оценок — пройдите калибровку.
               </p>
             ) : (
-              <div className="-mx-1 flex gap-4 overflow-x-auto px-1 pb-3 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                {history.map((movie) => (
-                  <div
-                    key={movie.id}
-                    className="w-[130px] shrink-0 rounded-2xl bg-sand-100 p-2 shadow-[0_8px_20px_rgba(107,79,58,0.08)]"
-                  >
-                    <div className="relative overflow-hidden rounded-xl bg-sand-200">
-                      <img
-                        src={movie.poster_url}
-                        alt={movie.title}
-                        className="h-[170px] w-full object-cover"
-                      />
-                      {movie.rating != null && (
-                        <span className="absolute right-1.5 top-1.5 rounded-full bg-brown-600/90 px-2 py-0.5 text-[11px] font-semibold text-sand-50">
-                          ★ {movie.rating}
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-2 truncate text-[12px] font-medium text-brown-700">
-                      {movie.title}
-                    </p>
-                    {editingId === movie.id ? (
-                      <div className="mt-2">
-                        <div
-                          className="flex items-center justify-center gap-0.5"
-                          role="group"
-                          aria-label={`Оценка фильма ${movie.title}`}
-                        >
-                          {[1, 2, 3, 4, 5].map((star) => (
-                            <button
-                              key={star}
-                              type="button"
-                              onClick={() => handleRate(movie.id, star)}
-                              disabled={savingId === movie.id}
-                              aria-label={`Оценка ${star}`}
-                              className={`text-base leading-none transition hover:text-honey-400 disabled:opacity-50 ${
-                                (movie.rating ?? 0) >= star
-                                  ? 'text-honey-400'
-                                  : 'text-sand-300'
-                              }`}
-                            >
-                              ★
-                            </button>
-                          ))}
+              <>
+                <div
+                  ref={historyRef}
+                  className="-mx-1 flex gap-4 overflow-x-auto px-1 pb-3 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                >
+                  {history.map((movie) => (
+                    <div
+                      key={movie.id}
+                      className="w-[130px] shrink-0 rounded-2xl bg-sand-100 p-2 shadow-[0_8px_20px_rgba(107,79,58,0.08)]"
+                    >
+                      <div className="relative overflow-hidden rounded-xl bg-sand-200">
+                        <img
+                          src={movie.poster_url}
+                          alt={movie.title}
+                          className="h-[170px] w-full object-cover"
+                        />
+                        {movie.rating != null && (
+                          <span className="absolute right-1.5 top-1.5 rounded-full bg-brown-600/90 px-2 py-0.5 text-[11px] font-semibold text-sand-50">
+                            ★ {movie.rating}
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-2 truncate text-[12px] font-medium text-brown-700">
+                        {movie.title}
+                      </p>
+                      {editingId === movie.id ? (
+                        <div className="mt-2">
+                          <div
+                            className="flex items-center justify-center gap-0.5"
+                            role="group"
+                            aria-label={`Оценка фильма ${movie.title}`}
+                          >
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <button
+                                key={star}
+                                type="button"
+                                onClick={() => handleRate(movie.id, star)}
+                                disabled={savingId === movie.id}
+                                aria-label={`Оценка ${star}`}
+                                className={`text-base leading-none transition hover:text-honey-400 disabled:opacity-50 ${
+                                  (movie.rating ?? 0) >= star
+                                    ? 'text-honey-400'
+                                    : 'text-sand-300'
+                                }`}
+                              >
+                                ★
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setEditingId(null)}
+                            className="mt-1 w-full text-[10px] font-medium text-brown-400 transition hover:text-brown-600"
+                          >
+                            Отмена
+                          </button>
                         </div>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => setEditingId(null)}
-                          className="mt-1 w-full text-[10px] font-medium text-brown-400 transition hover:text-brown-600"
+                          onClick={() => {
+                            setEditingId(movie.id)
+                            setRateError(null)
+                          }}
+                          className="mt-2 w-full rounded-xl bg-sand-200 py-1.5 text-[11px] font-medium text-brown-600 transition hover:bg-sand-300"
                         >
-                          Отмена
+                          Изменить оценку
                         </button>
-                      </div>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingId(movie.id)
-                          setRateError(null)
-                        }}
-                        className="mt-2 w-full rounded-xl bg-sand-200 py-1.5 text-[11px] font-medium text-brown-600 transition hover:bg-sand-300"
-                      >
-                        Изменить оценку
-                      </button>
-                    )}
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {scrollState.max > 0 && (
+                  <div className="mt-1 flex items-center gap-3">
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      step="any"
+                      value={scrollPercent}
+                      onChange={handleHistoryScroll}
+                      aria-label="Прокрутка истории оценок"
+                      className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-sand-200 accent-clay-500"
+                    />
                   </div>
-                ))}
-              </div>
+                )}
+              </>
             )}
           </div>
         </div>
