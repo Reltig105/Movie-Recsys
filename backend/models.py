@@ -8,10 +8,32 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Column,
+    Float,
+    ForeignKey,
+    Integer,
+    MetaData,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+
+
+#: Предрасчитанная статистика оценок — materialized view (см.
+#: :mod:`backend.refresh_stats`). Отдельный ``MetaData``: ``create_all`` не
+#: должен пытаться создать её как обычную таблицу.
+movie_stats = Table(
+    "movie_stats",
+    MetaData(),
+    Column("movie_id", Integer, primary_key=True),
+    Column("avg_rating", Float, nullable=False),
+    Column("ratings_count", Integer, nullable=False),
+)
 
 
 class Movie(Base):

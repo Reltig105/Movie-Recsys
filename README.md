@@ -109,6 +109,8 @@ $env:TMDB_API_KEY = "ваш_ключ"          # Windows PowerShell
 # строит уже ПОСЛЕ заливки — production-приём для десятков миллионов строк.
 python -m backend.load_movielens --reset    # пакетный asyncpg COPY
 python -m backend.enrich_movies             # TMDB-обогащение каталога (async)
+python -m backend.enrich_movies --missing   # добор постеров/описаний (англ. фолбэк)
+python -m backend.refresh_stats             # movie_stats: агрегация 32M ratings
 
 # 5. Поднять API и проверить связку
 uvicorn backend.api:app --host 127.0.0.1 --port 8000
@@ -118,8 +120,18 @@ uvicorn backend.api:app --host 127.0.0.1 --port 8000
 `load_movielens` заливает данные нативным `asyncpg COPY` (десятки тыс. строк/с),
 `enrich_movies` — полностью асинхронный (`asyncio` + `aiohttp`,
 `asyncio.Semaphore(40)`), идемпотентный и возобновляемый: повторный запуск
-дообрабатывает только фильмы без постера. Маппинг MovieLens→TMDB берётся из
-официального `data/links.csv` (не хардкодится).
+дообрабатывает только фильмы без постера, а `--missing` — ещё и фильмы без
+описания. Маппинг MovieLens→TMDB берётся из официального `data/links.csv`
+(не хардкодится). Если `overview` в основной локали (`--language`, по умолчанию
+`ru-RU`) пуст, описание подтягивается из английской локали (`--no-fallback`
+отключает это); название и прочие поля фолбэк не подменяет.
+
+Агрегаты по оценкам не считаются в API: `python -m backend.refresh_stats`
+создаёт materialized view `movie_stats(movie_id, avg_rating, ratings_count)`
+одним `GROUP BY` по 32M строк и обновляет её через
+`REFRESH MATERIALIZED VIEW CONCURRENTLY` (уникальный индекс по `movie_id`
+позволяет обновлять без блокировки чтений). `/api/v1/feed` читает только
+`movies` + `movie_stats` и к `ratings` не обращается.
 
 ### Эндпоинты `backend/api.py`
 

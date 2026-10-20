@@ -47,12 +47,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import dispose, get_session, init_db
-from .models import Movie, Rating, User
+from .models import Movie, Rating, User, movie_stats
 
 logger = logging.getLogger(__name__)
 
 MAX_LIMIT = 100
 _PBKDF2_ITERATIONS = 200_000
+
+# Лента читает только ``movies`` + предрасчитанную ``movie_stats`` (без ratings).
+FEED_MIN_RATINGS = 20
+FEED_POOL_SIZE = 60
 
 
 @asynccontextmanager
@@ -271,17 +275,20 @@ async def _fetch_user(session: AsyncSession, user_id: int) -> User:
 async def _popular_ranked(
     session: AsyncSession, min_ratings: int = 1, limit: int = 1000
 ) -> list[tuple[Movie, float, int]]:
-    """Отранжированные по среднему рейтингу фильмы: ``[(Movie, avg, count), ...]``."""
+    """Топ фильмов из предрасчитанной ``movie_stats``: ``[(Movie, avg, count), ...]``.
+
+    Агрегация по ``ratings`` здесь **не выполняется**: тяжёлый ``GROUP BY`` по
+    32M строк считается заранее в :mod:`backend.refresh_stats`, API читает
+    готовые ``(avg_rating, ratings_count)``.
+    """
     statement = (
-        select(
-            Movie,
-            func.avg(Rating.score).label("score"),
-            func.count(Rating.id).label("cnt"),
+        select(Movie, movie_stats.c.avg_rating, movie_stats.c.ratings_count)
+        .join(movie_stats, movie_stats.c.movie_id == Movie.id)
+        .where(movie_stats.c.ratings_count >= min_ratings)
+        .order_by(
+            movie_stats.c.avg_rating.desc(),
+            movie_stats.c.ratings_count.desc(),
         )
-        .join(Rating, Rating.movie_id == Movie.id)
-        .group_by(Movie.id)
-        .having(func.count(Rating.id) >= min_ratings)
-        .order_by(func.avg(Rating.score).desc(), func.count(Rating.id).desc())
         .limit(limit)
     )
     rows = (await session.execute(statement)).all()
@@ -573,25 +580,41 @@ async def api_feed(
     exclude_ids: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[FeedMovie]:
-    """``top_k`` фильмов для главной карусели (стабильный топ либо перемешанный)."""
+    """``top_k`` фильмов для главной карусели (стабильный топ либо перемешанный).
+
+    Читает только ``movies`` и предрасчитанную ``movie_stats`` — таблица
+    ``ratings`` (32M строк) не затрагивается вообще. ``user_id`` сохранён в
+    контракте для совместимости; уже показанные фильмы клиент скрывает через
+    ``exclude_ids``.
+    """
     top_k = max(1, int(top_k))
-    pool_size = max(top_k, 60)
+    pool_size = max(top_k, FEED_POOL_SIZE)
 
-    rows = await _popular_movies(
-        session, top_k=pool_size, min_ratings=20, exclude_user_id=user_id
+    statement = (
+        select(Movie, movie_stats.c.avg_rating, movie_stats.c.ratings_count)
+        .join(movie_stats, movie_stats.c.movie_id == Movie.id)
+        .where(movie_stats.c.ratings_count >= FEED_MIN_RATINGS)
+        .order_by(
+            movie_stats.c.avg_rating.desc(),
+            movie_stats.c.ratings_count.desc(),
+        )
+        .limit(pool_size)
     )
+    rows = (await session.execute(statement)).all()
+    pool = [(movie, float(score), int(count)) for movie, score, count in rows]
 
-    if seed is not None and len(rows) > top_k:
-        pool = list(rows)
-        if exclude_ids:
-            hidden = {
-                int(part) for part in exclude_ids.split(",") if part.strip().isdigit()
-            }
-            without_previous = [row for row in pool if row[0].id not in hidden]
-            if len(without_previous) >= top_k:
-                pool = without_previous
-        rows = random.Random(seed).sample(pool, top_k)
-        rows.sort(key=lambda row: (row[1], row[2]), reverse=True)
+    if exclude_ids:
+        hidden = {int(part) for part in exclude_ids.split(",") if part.strip().isdigit()}
+        visible = [row for row in pool if row[0].id not in hidden]
+        # Если скрыто слишком много — отдаём пул без фильтра, чтобы не вернуть пусто.
+        if len(visible) >= top_k:
+            pool = visible
+
+    if seed is not None and len(pool) > top_k:
+        selected = random.Random(seed).sample(pool, top_k)
+        selected.sort(key=lambda row: (row[1], row[2]), reverse=True)
+    else:
+        selected = pool[:top_k]
 
     return [
         FeedMovie(
@@ -603,7 +626,7 @@ async def api_feed(
             score=score,
             synopsis=movie.synopsis or "",
         )
-        for movie, score, _ in rows[:top_k]
+        for movie, score, _ in selected
     ]
 
 

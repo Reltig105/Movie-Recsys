@@ -52,6 +52,7 @@ import time
 from collections.abc import Iterator
 
 import asyncpg
+from sqlalchemy import text
 
 from backend.database import DATABASE_URL, Base, engine, init_db
 
@@ -147,6 +148,9 @@ async def recreate_schema() -> None:
     from backend import models  # noqa: F401  (регистрирует модели в Base.metadata)
 
     async with engine.begin() as connection:
+        # movie_stats (materialized view) зависит от ratings: без этого
+        # PostgreSQL откажется удалять ratings через drop_all.
+        await connection.execute(text("DROP MATERIALIZED VIEW IF EXISTS movie_stats"))
         await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
     logger.info("Схема пересоздана (drop_all + create_all)")
