@@ -71,6 +71,9 @@ function Slider({ slider, value, onChange }) {
 function Profile({ userId = 1 }) {
   const [profile, setProfile] = useState(null)
   const [error, setError] = useState(null)
+  const [editingId, setEditingId] = useState(null)
+  const [savingId, setSavingId] = useState(null)
+  const [rateError, setRateError] = useState(null)
   const [settings, setSettings] = useState({
     mood: 55,
     risk: 30,
@@ -104,6 +107,36 @@ function Profile({ userId = 1 }) {
 
   const updateSetting = (id, value) =>
     setSettings((prev) => ({ ...prev, [id]: value }))
+
+  const handleRate = async (movieId, value) => {
+    setSavingId(movieId)
+    setRateError(null)
+
+    try {
+      // POST /rate — upsert по паре (user_id, movie_id).
+      await api.post('/rate', {
+        user_id: userId,
+        movie_id: movieId,
+        rating: value,
+      })
+      setProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              history: prev.history.map((movie) =>
+                movie.id === movieId ? { ...movie, rating: value } : movie,
+              ),
+            }
+          : prev,
+      )
+      setEditingId(null)
+    } catch (err) {
+      console.error('Не удалось обновить оценку:', err)
+      setRateError('Не удалось сохранить оценку')
+    } finally {
+      setSavingId(null)
+    }
+  }
 
   return (
     <div className="h-full w-full overflow-y-auto px-10 py-10">
@@ -191,6 +224,10 @@ function Profile({ userId = 1 }) {
               История твоих оценок
             </h2>
 
+            {rateError && (
+              <p className="-mt-2 mb-3 text-xs text-clay-600">{rateError}</p>
+            )}
+
             {history.length === 0 ? (
               <p className="text-sm text-brown-400">
                 Пока нет оценок — пройдите калибровку.
@@ -217,12 +254,50 @@ function Profile({ userId = 1 }) {
                     <p className="mt-2 truncate text-[12px] font-medium text-brown-700">
                       {movie.title}
                     </p>
-                    <button
-                      type="button"
-                      className="mt-2 w-full rounded-xl bg-sand-200 py-1.5 text-[11px] font-medium text-brown-600 transition hover:bg-sand-300"
-                    >
-                      Изменить вайбинг
-                    </button>
+                    {editingId === movie.id ? (
+                      <div className="mt-2">
+                        <div
+                          className="flex items-center justify-center gap-0.5"
+                          role="group"
+                          aria-label={`Оценка фильма ${movie.title}`}
+                        >
+                          {[1, 2, 3, 4, 5].map((star) => (
+                            <button
+                              key={star}
+                              type="button"
+                              onClick={() => handleRate(movie.id, star)}
+                              disabled={savingId === movie.id}
+                              aria-label={`Оценка ${star}`}
+                              className={`text-base leading-none transition hover:text-honey-400 disabled:opacity-50 ${
+                                (movie.rating ?? 0) >= star
+                                  ? 'text-honey-400'
+                                  : 'text-sand-300'
+                              }`}
+                            >
+                              ★
+                            </button>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setEditingId(null)}
+                          className="mt-1 w-full text-[10px] font-medium text-brown-400 transition hover:text-brown-600"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingId(movie.id)
+                          setRateError(null)
+                        }}
+                        className="mt-2 w-full rounded-xl bg-sand-200 py-1.5 text-[11px] font-medium text-brown-600 transition hover:bg-sand-300"
+                      >
+                        Изменить оценку
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
