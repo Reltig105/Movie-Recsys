@@ -5,3 +5,7 @@ sqlalchemy==2.1.5
 asyncpg==0.32.0
 aiohttp==3.14.5
 pydantic==2.14.1
+# Офлайн-пайплайн LightFM: разреженные матрицы и подготовка признаков.
+numpy==2.5.4
+scipy==1.18.1
+pandas==3.0.6

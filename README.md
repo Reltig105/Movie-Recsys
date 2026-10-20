@@ -25,6 +25,9 @@ movie-recsys/
 │   ├── tmdb.py                   # Клиент TMDB (async aiohttp) и links.csv
 │   ├── load_movielens.py         # Пакетная загрузка MovieLens 32M через asyncpg COPY
 │   ├── enrich_movies.py          # Обогащение каталога TMDB (asyncio + Semaphore 40)
+│   ├── refresh_stats.py          # movie_stats (materialized view) по 32M оценок
+│   ├── ml_pipeline/              # Офлайн-матрицы для LightFM (scipy.sparse)
+│   │   └── build_features.py     # interactions.npz + item_features.npz + маппинги id
 │   ├── download_data.py          # Скачивание и распаковка MovieLens 32M
 │   └── requirements.txt          # fastapi, uvicorn, sqlalchemy, asyncpg, aiohttp, pydantic
 ├── api.py                        # Шим: реэкспорт backend.api:app
@@ -146,6 +149,27 @@ uvicorn backend.api:app --host 127.0.0.1 --port 8000
 > один раз: `ALTER TABLE movies ADD COLUMN IF NOT EXISTS tmdb_checked_at timestamptz;`
 > (при `load_movielens --reset` она создаётся из `backend/models.py` автоматически).
 
+Оценки хранятся **без округления**: шкала MovieLens — 0.5…5.0 с шагом 0.5, поэтому
+`Rating.score` объявлен как `double precision` (целочисленный тип терял 31% значений).
+Если база заливалась старой версией скрипта, тип и значения обновляются так:
+
+```bash
+# 1. ALTER COLUMN TYPE блокируется materialized view, поэтому сначала удаляем её
+docker exec rexter-postgres psql -U postgres -d rexter_db \
+  -c "DROP MATERIALIZED VIEW IF EXISTS movie_stats;" \
+  -c "ALTER TABLE ratings ALTER COLUMN score TYPE double precision USING score::double precision;"
+
+# 2. TRUNCATE + COPY заново: каталог и TMDB-обогащение не затрагиваются
+python -m backend.load_movielens --reload-ratings
+
+# 3. Вернуть предрасчитанную статистику
+python -m backend.refresh_stats
+```
+
+`--reload-ratings` снимает индексы и констрейнты `ratings`, делает `TRUNCATE`
+(дешевле 32 млн `DELETE`), заливает `ratings.csv` через `COPY` и строит объекты
+обратно — тем же путём, что и первичная загрузка.
+
 Агрегаты по оценкам не считаются в API: `python -m backend.refresh_stats`
 создаёт materialized view `movie_stats(movie_id, avg_rating, ratings_count)`
 одним `GROUP BY` по 32M строк и обновляет её через
@@ -174,6 +198,35 @@ uvicorn backend.api:app --host 127.0.0.1 --port 8000
 Корневой `api.py` — тонкий шим, реэкспортирующий `backend.api:app`, поэтому
 запуск `uvicorn api:app` также работает. Пароли хранятся как PBKDF2-HMAC-SHA256
 (только stdlib), схема создаётся автоматически на старте приложения.
+
+## 🧩 Офлайн-данные для LightFM (`backend/ml_pipeline`)
+
+```bash
+python -m backend.ml_pipeline.build_features            # ~4 мин, ~1 ГБ RAM
+python -m backend.ml_pipeline.build_features --limit 2000000 --chunk-size 500000
+```
+
+Скрипт читает PostgreSQL курсором (asyncpg) порциями и складывает в
+`data/processed/` готовые к обучению разреженные матрицы:
+
+| Файл | Что внутри |
+| --- | --- |
+| `interactions.npz` | CSR `users × movies` (200 948 × 87 585), значения — `score` (float32) |
+| `item_features.npz` | CSR `movies × features` (87 585 × 131 717), multi-hot жанров, режиссёра и актёров |
+| `user_mapping.pkl` | `{"raw_to_index": {…}, "index_to_raw": np.int32[…]}` |
+| `movie_mapping.pkl` | то же для фильмов |
+| `item_feature_names.pkl` | имена колонок `item_features` (`genre:*`, `director:*`, `cast:*`) |
+
+`movie_id` MovieLens не непрерывны (до 292 757 при 87 585 фильмах), поэтому обе
+оси перенумерованы в `0…N-1`; обратное преобразование — `index_to_raw[индекс]`.
+Жанры/режиссёр/актёры — строки через запятую из `movies`; отсутствующее значение
+превращается в признак `<unknown>` соответствующего типа, чтобы у фильма не
+осталось пустой строки признаков. NaN-ы (фильмы без режиссёра/актёров) и пустые
+жанры обрабатываются так же.
+
+Память: 32 млн взаимодействий — три массива `int32/int32/float32` (≈ 384 МБ)
+плюс столько же на момент сборки CSR; порция pandas-фрейма (1 млн строк)
+освобождается сразу. Артефакты не коммитятся — `data/` в `.gitignore`.
 
 ## 🧠 Модели
 
