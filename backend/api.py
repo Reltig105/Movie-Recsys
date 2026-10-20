@@ -58,6 +58,12 @@ _PBKDF2_ITERATIONS = 200_000
 FEED_MIN_RATINGS = 20
 FEED_POOL_SIZE = 60
 
+#: Временно: фильмы без постера не попадают в рекомендации (лента, калибровка,
+#: ``/recommend``) — вместо карточки с плейсхолдером лучше показать другой фильм.
+#: Из каталога они не исчезают: поиск, история оценок и профиль их видят.
+#: Чтобы вернуть их обратно, достаточно убрать это условие из трёх запросов ниже.
+RECOMMENDABLE = Movie.poster_url.is_not(None)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -284,7 +290,7 @@ async def _popular_ranked(
     statement = (
         select(Movie, movie_stats.c.avg_rating, movie_stats.c.ratings_count)
         .join(movie_stats, movie_stats.c.movie_id == Movie.id)
-        .where(movie_stats.c.ratings_count >= min_ratings)
+        .where(RECOMMENDABLE, movie_stats.c.ratings_count >= min_ratings)
         .order_by(
             movie_stats.c.avg_rating.desc(),
             movie_stats.c.ratings_count.desc(),
@@ -331,7 +337,9 @@ async def _popular_movies(
     if fallback_to_catalog and len(result) < top_k:
         seen = rated | {movie.id for movie, _, _ in result}
         catalog = await session.scalars(
-            select(Movie).order_by(Movie.year.is_(None), Movie.year.desc(), Movie.id)
+            select(Movie)
+            .where(RECOMMENDABLE)
+            .order_by(Movie.year.is_(None), Movie.year.desc(), Movie.id)
         )
         for movie in catalog:
             if movie.id in seen:
@@ -593,7 +601,7 @@ async def api_feed(
     statement = (
         select(Movie, movie_stats.c.avg_rating, movie_stats.c.ratings_count)
         .join(movie_stats, movie_stats.c.movie_id == Movie.id)
-        .where(movie_stats.c.ratings_count >= FEED_MIN_RATINGS)
+        .where(RECOMMENDABLE, movie_stats.c.ratings_count >= FEED_MIN_RATINGS)
         .order_by(
             movie_stats.c.avg_rating.desc(),
             movie_stats.c.ratings_count.desc(),
