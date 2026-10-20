@@ -1,4 +1,4 @@
-# ML System Design: Movie Recommendation Service
+# ML System Design: Rexter
 
 ## 1. Цели продукта и постановка задачи
 

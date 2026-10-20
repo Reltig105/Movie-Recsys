@@ -1,0 +1,43 @@
+# PostgreSQL 16 для Rexter (SQLAlchemy 2.0 + asyncpg, требует PostgreSQL 15+).
+#
+# Запуск:   docker compose up -d
+# Статус:   docker compose ps
+# Логи:     docker compose logs -f postgres
+# Стоп:     docker compose down            (данные сохраняются в named volume)
+# Сброс БД: docker compose down -v         (удаляет volume с данными)
+#
+# Параметры для быстрой массовой загрузки MovieLens 32M:
+# synchronous_commit=off и увеличенный WAL заметно ускоряют COPY, риск потери
+# данных при аварии минимален (это dev-база, её всегда можно перезалить).
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rexter-postgres
+    restart: unless-stopped
+    # /dev/shm для параллельных операций (сортировки, hash join) при массовой загрузке.
+    shm_size: "1gb"
+    command:
+      - "postgres"
+      - "-c"
+      - "synchronous_commit=off"
+      - "-c"
+      - "max_wal_size=4GB"
+      - "-c"
+      - "maintenance_work_mem=256MB"
+    environment:
+      POSTGRES_DB: rexter_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - rexter_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rexter_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  rexter_pgdata:
+    name: rexter_pgdata

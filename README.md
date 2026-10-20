@@ -1,4 +1,4 @@
-# 🎬 Movie-Recsys — Movie Recommendation Service
+# 🎬 Rexter — сервис персональных рекомендаций кино
 
 Минималистичный сервис персональных рекомендаций кино. Проект развивается по
 стратегии **ML-First**: сначала сильные офлайн-модели, затем масштабирование.
@@ -18,6 +18,17 @@
 
 ```
 movie-recsys/
+├── backend/                      # Единый бэкенд (FastAPI + PostgreSQL, только asyncpg)
+│   ├── api.py                    # REST API: аутентификация, оценки, лента, профиль
+│   ├── database.py               # Async-движок (только PostgreSQL), Base, get_session
+│   ├── models.py                 # ORM-модели: Movie, User, Rating
+│   ├── tmdb.py                   # Клиент TMDB (async aiohttp) и links.csv
+│   ├── load_movielens.py         # Пакетная загрузка MovieLens 32M через asyncpg COPY
+│   ├── enrich_movies.py          # Обогащение каталога TMDB (asyncio + Semaphore 40)
+│   ├── download_data.py          # Скачивание и распаковка MovieLens 32M
+│   └── requirements.txt          # fastapi, uvicorn, sqlalchemy, asyncpg, aiohttp, pydantic
+├── api.py                        # Шим: реэкспорт backend.api:app
+├── docker-compose.yml            # PostgreSQL 16 (rexter_db)
 ├── app.py                        # Streamlit-интерфейс (пока на mock-заглушке)
 ├── requirements.txt
 ├── DESIGN.md                     # System Design: цели, метрики, архитектура, схема данных
@@ -34,7 +45,6 @@ movie-recsys/
         ├── explore_data.py       # EDA: sparsity, распределения, топ фильмов
         ├── split_data.py         # хронологическое разбиение train/test
         ├── metrics.py            # RMSE
-        ├── data/db_init.py       # инициализация SQLite-хранилища метаданных
         └── models/
             ├── baseline.py       # ItemMeanBaseline
             ├── content_model.py  # content-based (TF-IDF + cosine)
@@ -73,6 +83,65 @@ python -m ml.src.models.svd_model
 # 6. Веб-интерфейс
 streamlit run app.py
 ```
+
+## 🗄️ Слой данных: PostgreSQL + SQLAlchemy 2.0 (async) + TMDB
+
+Слой данных — асинхронный SQLAlchemy 2.0 (`backend/database.py`, `backend/models.py`)
+поверх **PostgreSQL** через драйвер `asyncpg`. Модели: `Movie`, `User`, `Rating`.
+SQLite и другие драйверы не поддерживаются: `database.py` падает при импорте,
+если строка подключения не начинается с `postgresql+asyncpg://` (fail fast, без
+«тихого» fallback). Строка задаётся `REXTER_DATABASE_URL` / `DATABASE_URL`, по
+умолчанию — контейнер из `docker-compose.yml`.
+
+```bash
+# 1. Поднять PostgreSQL
+docker compose up -d
+
+# 2. Установить зависимости
+pip install -r backend/requirements.txt
+
+# 3. Задать ключ TMDB
+$env:TMDB_API_KEY = "ваш_ключ"          # Windows PowerShell
+# export TMDB_API_KEY="ваш_ключ"        # Linux/macOS
+
+# 4. Полный датасет MovieLens 32M (87 585 фильмов + 32 млн оценок).
+# load_movielens заливает строки «сырым» COPY, а индексы, UNIQUE и FK на ratings
+# строит уже ПОСЛЕ заливки — production-приём для десятков миллионов строк.
+python -m backend.load_movielens --reset    # пакетный asyncpg COPY
+python -m backend.enrich_movies             # TMDB-обогащение каталога (async)
+
+# 5. Поднять API и проверить связку
+uvicorn backend.api:app --host 127.0.0.1 --port 8000
+# GET http://127.0.0.1:8000/api/v1/movies
+```
+
+`load_movielens` заливает данные нативным `asyncpg COPY` (десятки тыс. строк/с),
+`enrich_movies` — полностью асинхронный (`asyncio` + `aiohttp`,
+`asyncio.Semaphore(40)`), идемпотентный и возобновляемый: повторный запуск
+дообрабатывает только фильмы без постера. Маппинг MovieLens→TMDB берётся из
+официального `data/links.csv` (не хардкодится).
+
+### Эндпоинты `backend/api.py`
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| `GET` | `/health` | Health-check |
+| `GET` | `/api/v1/movies?limit=` | Первые N фильмов (смоук-тест данных) |
+| `POST` | `/register` | Регистрация пользователя |
+| `POST` | `/login` | Вход (проверка пароля) |
+| `GET` | `/user/{user_id}` | Профиль пользователя |
+| `POST` | `/rate` | Сохранить оценку (upsert) |
+| `GET` | `/user/{user_id}/history` | История оценок |
+| `GET` | `/search?query=` | Поиск фильмов по названию |
+| `GET` | `/recommend/{user_id}` | Рекомендации (hot/cold start) |
+| `GET` | `/api/v1/calibration-movies` | Фильмы для онбординга |
+| `POST` | `/api/v1/rate` | Оценка из v1-фронтенда |
+| `GET` | `/api/v1/feed` | Лента-карусель |
+| `GET` | `/api/v1/profile` | Профиль: статистика, жанры, история |
+
+Корневой `api.py` — тонкий шим, реэкспортирующий `backend.api:app`, поэтому
+запуск `uvicorn api:app` также работает. Пароли хранятся как PBKDF2-HMAC-SHA256
+(только stdlib), схема создаётся автоматически на старте приложения.
 
 ## 🧠 Модели
 
