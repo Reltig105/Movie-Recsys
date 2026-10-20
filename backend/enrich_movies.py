@@ -13,11 +13,14 @@
 * никаких потоков (``threading``) и никакого SQLite.
 
 Скрипт идемпотентен и возобновляем: по умолчанию обрабатываются только фильмы
-без постера (``poster_url IS NULL``), поэтому повторный запуск продолжит работу.
+без постера (``poster_url IS NULL``), а ``--missing`` дополнительно добирает
+фильмы без описания. Если ``overview`` в основной локали пуст, из TMDB берётся
+английский текст — **название и остальные поля при этом не переводятся**.
 
 Использование::
 
     python -m backend.enrich_movies                  # только фильмы без постера
+    python -m backend.enrich_movies --missing        # постер или описание отсутствуют
     python -m backend.enrich_movies --concurrency 40
     python -m backend.enrich_movies --limit 500
     python -m backend.enrich_movies --all            # переобработать весь каталог
@@ -38,6 +41,7 @@ from backend.database import DATABASE_URL, engine, init_db
 from backend.load_movielens import dsn_from_url
 from backend.tmdb import (
     DEFAULT_LANGUAGE,
+    FALLBACK_LANGUAGE,
     MovieRecord,
     fetch_movie_async,
     load_links,
@@ -88,21 +92,33 @@ async def _fetch_one(
     tmdb_id: int,
     api_key: str,
     language: str,
+    fallback_language: str | None,
 ) -> MovieRecord | None:
     """Скачать и разобрать один фильм под ограничением семафора."""
     async with semaphore:
-        payload = await fetch_movie_async(http, tmdb_id, api_key, language)
+        payload = await fetch_movie_async(
+            http, tmdb_id, api_key, language, fallback_language=fallback_language
+        )
     if payload is None:
         return None
     return parse_movie(movie_id, payload)
 
 
 async def _select_targets(
-    conn: asyncpg.Connection, mapping: dict[int, int], all_movies: bool, limit: int | None
+    conn: asyncpg.Connection,
+    mapping: dict[int, int],
+    all_movies: bool,
+    missing_synopsis: bool,
+    limit: int | None,
 ) -> list[tuple[int, int]]:
     """Определить список ``(movieId, tmdbId)`` для обработки."""
     if all_movies:
         rows = await conn.fetch("SELECT id FROM movies")
+    elif missing_synopsis:
+        rows = await conn.fetch(
+            "SELECT id FROM movies "
+            "WHERE poster_url IS NULL OR synopsis IS NULL OR synopsis = ''"
+        )
     else:
         rows = await conn.fetch("SELECT id FROM movies WHERE poster_url IS NULL")
     target_ids = sorted({row["id"] for row in rows} & set(mapping))
@@ -117,10 +133,12 @@ async def enrich(
     *,
     links_path: str = LINKS_CSV,
     all_movies: bool = False,
+    missing_synopsis: bool = False,
     limit: int | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     batch: int = DEFAULT_BATCH,
     language: str = DEFAULT_LANGUAGE,
+    fallback_language: str | None = FALLBACK_LANGUAGE,
 ) -> tuple[int, int]:
     """Обогатить каталог. Возвращает ``(обновлено, пропущено)``."""
     await init_db()
@@ -130,7 +148,7 @@ async def enrich(
     conn = await asyncpg.connect(dsn_from_url(DATABASE_URL))
     updated = skipped = 0
     try:
-        pairs = await _select_targets(conn, mapping, all_movies, limit)
+        pairs = await _select_targets(conn, mapping, all_movies, missing_synopsis, limit)
         if not pairs:
             logger.info("Нечего обогащать: подходящих фильмов нет")
             return 0, 0
@@ -150,7 +168,8 @@ async def enrich(
                 chunk = pairs[start : start + DEFAULT_CHUNK]
                 results = await asyncio.gather(
                     *(
-                        _fetch_one(http, semaphore, movie_id, tmdb_id, api_key, language)
+                        _fetch_one(http, semaphore, movie_id, tmdb_id, api_key, language,
+                                   fallback_language)
                         for movie_id, tmdb_id in chunk
                     )
                 )
@@ -191,6 +210,14 @@ def main(argv: list[str] | None = None) -> int:
         description="Массовое обогащение каталога Rexter метаданными TMDB (async)."
     )
     parser.add_argument("--all", action="store_true", help="обрабатывать все фильмы (не только без постера)")
+    parser.add_argument(
+        "--missing", action="store_true",
+        help="добирать фильмы без постера ИЛИ без описания (с англ. фолбэком)",
+    )
+    parser.add_argument(
+        "--no-fallback", action="store_true",
+        help="не запрашивать англ. описание, если пусто в основной локали",
+    )
     parser.add_argument("--limit", type=int, help="ограничить число фильмов")
     parser.add_argument(
         "--concurrency", type=int, default=DEFAULT_CONCURRENCY,
@@ -218,10 +245,12 @@ def main(argv: list[str] | None = None) -> int:
                 os.environ["TMDB_API_KEY"],
                 links_path=args.links,
                 all_movies=args.all,
+                missing_synopsis=args.missing,
                 limit=args.limit,
                 concurrency=args.concurrency,
                 batch=args.batch,
                 language=args.language,
+                fallback_language=None if args.no_fallback else FALLBACK_LANGUAGE,
             )
         )
     except KeyboardInterrupt:

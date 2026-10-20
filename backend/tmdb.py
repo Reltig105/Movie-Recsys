@@ -23,6 +23,8 @@ logger = logging.getLogger("tmdb")
 TMDB_API_BASE = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
 DEFAULT_LANGUAGE = "ru-RU"
+# Резервная локаль для описаний: у многих фильмов нет русского overview.
+FALLBACK_LANGUAGE = "en-US"
 REQUEST_TIMEOUT = 20.0
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1.5
@@ -123,19 +125,27 @@ def parse_movie(movielens_id: int, payload: dict) -> MovieRecord | None:
     return _payload_to_record(movielens_id, payload)
 
 
-def _movie_params(api_key: str, language: str) -> dict:
-    return {"api_key": api_key, "append_to_response": "credits", "language": language}
+def _movie_params(api_key: str, language: str, *, with_credits: bool = True) -> dict:
+    params = {"api_key": api_key, "language": language}
+    if with_credits:
+        params["append_to_response"] = "credits"
+    return params
 
 
 # --------------------------------------------------------------------------- #
 # Асинхронный клиент (основной путь для массовых скриптов)
 # --------------------------------------------------------------------------- #
-async def fetch_movie_async(
-    session: aiohttp.ClientSession, tmdb_id: int, api_key: str, language: str
+async def _request_movie(
+    session: aiohttp.ClientSession,
+    tmdb_id: int,
+    api_key: str,
+    language: str,
+    *,
+    with_credits: bool = True,
 ) -> dict | None:
-    """GET одного фильма TMDB (с credits) через ``aiohttp``; транзиентные сбои ретраятся."""
+    """GET ``/movie/{id}`` с ретраями; ``None`` при 404 или исчерпании попыток."""
     url = f"{TMDB_API_BASE}/movie/{tmdb_id}"
-    params = _movie_params(api_key, language)
+    params = _movie_params(api_key, language, with_credits=with_credits)
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -163,6 +173,40 @@ async def fetch_movie_async(
     logger.error("TMDB id %s: не удалось получить данные после %s попыток",
                  tmdb_id, MAX_RETRIES)
     return None
+
+
+async def fetch_movie_async(
+    session: aiohttp.ClientSession,
+    tmdb_id: int,
+    api_key: str,
+    language: str,
+    fallback_language: str | None = None,
+) -> dict | None:
+    """GET одного фильма TMDB (с credits) через ``aiohttp``; сбои ретраятся.
+
+    Если в запрошенной локали нет ``overview`` (частый случай для ru-RU), а
+    ``fallback_language`` задан, выполняется облегчённый запрос в резервной
+    локали и из него берётся **только** описание. Название и метаданные
+    остаются в основной локали.
+    """
+    payload = await _request_movie(session, tmdb_id, api_key, language)
+    if payload is None:
+        return None
+
+    if (
+        fallback_language
+        and fallback_language != language
+        and payload.get("poster_path")
+        and not (payload.get("overview") or "").strip()
+    ):
+        fallback = await _request_movie(
+            session, tmdb_id, api_key, fallback_language, with_credits=False
+        )
+        overview = (fallback or {}).get("overview") or ""
+        if overview.strip():
+            payload = {**payload, "overview": overview}
+
+    return payload
 
 
 def load_links(path: str) -> dict[int, int]:
