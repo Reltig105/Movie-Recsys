@@ -12,10 +12,22 @@
 * запись — пакетный ``asyncpg.Connection.executemany`` по батчам;
 * никаких потоков (``threading``) и никакого SQLite.
 
-Скрипт идемпотентен и возобновляем: по умолчанию обрабатываются только фильмы
-без постера (``poster_url IS NULL``), а ``--missing`` дополнительно добирает
-фильмы без описания. Если ``overview`` в основной локали пуст, из TMDB берётся
-английский текст — **название и остальные поля при этом не переводятся**.
+Стратегия добора:
+
+1. основная запись — ``/movie/{tmdbId}`` из ``links.csv``;
+2. если постер или описание так и не нашлись (а также если ``tmdbId`` в
+   ``links.csv`` вообще отсутствует) — строгий поиск ``/search/movie`` по
+   названию и году: у части фильмов ссылка ведёт на «пустой» дубликат TMDB,
+   тогда как соседняя запись с тем же названием и годом имеет постер;
+3. найденная запись **дополняет** основную только пустыми полями — название
+   никогда не подменяется;
+4. факт окончательного ответа TMDB отмечается в ``movies.tmdb_checked_at``,
+   поэтому повторный запуск не дёргает фильмы, для которых на TMDB ничего нет.
+
+Скрипт идемпотентен и возобновляем: по умолчанию обрабатываются фильмы без
+постера (``poster_url IS NULL``), ``--missing`` дополнительно добирает фильмы без
+описания. Если ``overview`` в основной локали пуст, из TMDB берётся английский
+текст — **название и остальные поля при этом не переводятся**.
 
 Использование::
 
@@ -33,6 +45,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 import aiohttp
 import asyncpg
@@ -43,9 +56,11 @@ from backend.tmdb import (
     DEFAULT_LANGUAGE,
     FALLBACK_LANGUAGE,
     MovieRecord,
-    fetch_movie_async,
+    fetch_movie_result,
     load_links,
+    merge_records,
     parse_movie,
+    search_movie_result,
 )
 
 logger = logging.getLogger("enrich_movies")
@@ -58,21 +73,30 @@ DEFAULT_BATCH = 500       # размер пакета UPDATE
 DEFAULT_CHUNK = 1000      # сколько задач держать «в полёте» одновременно
 MAX_DB_POOL = 1           # все записи идут через одно соединение asyncpg
 
+# Обновление строго аддитивное: пустое/None-значение никогда не затирает уже
+# имеющиеся данные (важно для добора, где TMDB может отдать запись без постера).
 _UPDATE_SQL = """
     UPDATE movies
-       SET title = $2,
-           year = $3,
-           genres = $4,
-           poster_url = $5,
-           synopsis = $6,
-           director = $7,
-           cast_members = $8
+       SET title = COALESCE(NULLIF($2, ''), title),
+           year = COALESCE($3, year),
+           genres = COALESCE(NULLIF($4, ''), genres),
+           poster_url = COALESCE($5, poster_url),
+           synopsis = COALESCE(NULLIF($6, ''), synopsis),
+           director = COALESCE(NULLIF($7, ''), director),
+           cast_members = COALESCE(NULLIF($8, ''), cast_members),
+           tmdb_checked_at = COALESCE($9, tmdb_checked_at)
      WHERE id = $1
 """
 
 
-def _as_params(record: MovieRecord) -> tuple:
-    """Преобразовать :class:`MovieRecord` в кортеж параметров UPDATE."""
+def _as_params(
+    movie_id: int,
+    record: MovieRecord | None,
+    checked_at: datetime | None,
+) -> tuple:
+    """Преобразовать :class:`MovieRecord` (или пустой результат) в параметры UPDATE."""
+    if record is None:
+        return (movie_id, None, None, None, None, None, None, None, checked_at)
     return (
         record.id,
         record.title,
@@ -82,6 +106,7 @@ def _as_params(record: MovieRecord) -> tuple:
         record.synopsis,
         record.director,
         record.cast_members,
+        checked_at,
     )
 
 
@@ -89,19 +114,45 @@ async def _fetch_one(
     http: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore,
     movie_id: int,
-    tmdb_id: int,
+    tmdb_id: int | None,
+    title: str,
+    year: int | None,
     api_key: str,
     language: str,
     fallback_language: str | None,
-) -> MovieRecord | None:
-    """Скачать и разобрать один фильм под ограничением семафора."""
+) -> tuple[MovieRecord | None, bool]:
+    """Скачать и разобрать один фильм под ограничением семафора.
+
+    Возвращает ``(record, definitive)``: ``definitive`` — TMDB дал окончательный
+    ответ, повторять не нужно.
+    """
+    record: MovieRecord | None = None
+    legs: list[bool] = []  # окончательность каждого выполненного запроса
+
     async with semaphore:
-        payload = await fetch_movie_async(
-            http, tmdb_id, api_key, language, fallback_language=fallback_language
-        )
-    if payload is None:
-        return None
-    return parse_movie(movie_id, payload)
+        if tmdb_id is not None:
+            payload, definitive = await fetch_movie_result(
+                http, tmdb_id, api_key, language, fallback_language=fallback_language
+            )
+            legs.append(definitive)
+            if payload is not None:
+                record = parse_movie(movie_id, payload)
+
+        # Добор по названию: и когда ссылки нет, и когда у основной записи нет
+        # постера или описания.
+        if record is None or not record.poster_url or not record.synopsis:
+            alt_payload, alt_definitive = await search_movie_result(
+                http, title, year, api_key, language,
+                fallback_language=fallback_language,
+            )
+            legs.append(alt_definitive)
+            if alt_payload is not None:
+                alt_record = parse_movie(movie_id, alt_payload)
+                record = merge_records(record, alt_record) if record else alt_record
+
+    # Помечаем проверенным, только если все обращения к TMDB дали окончательный
+    # ответ: иначе разовый сетевой сбой «залипнет» и фильм больше не доберётся.
+    return record, bool(legs) and all(legs)
 
 
 async def _select_targets(
@@ -110,22 +161,34 @@ async def _select_targets(
     all_movies: bool,
     missing_synopsis: bool,
     limit: int | None,
-) -> list[tuple[int, int]]:
-    """Определить список ``(movieId, tmdbId)`` для обработки."""
+) -> list[tuple[int, int | None, str, int | None]]:
+    """Определить список ``(movieId, tmdbId, title, year)`` для обработки.
+
+    Фильмы без ``tmdbId`` тоже попадают в выборку — их ищут по названию и году.
+    Уже проверенные (``tmdb_checked_at``) повторно не берутся.
+    """
     if all_movies:
-        rows = await conn.fetch("SELECT id FROM movies")
+        rows = await conn.fetch("SELECT id, title, year FROM movies")
     elif missing_synopsis:
         rows = await conn.fetch(
-            "SELECT id FROM movies "
-            "WHERE poster_url IS NULL OR synopsis IS NULL OR synopsis = ''"
+            "SELECT id, title, year FROM movies "
+            "WHERE (poster_url IS NULL OR synopsis IS NULL OR synopsis = '') "
+            "  AND tmdb_checked_at IS NULL"
         )
     else:
-        rows = await conn.fetch("SELECT id FROM movies WHERE poster_url IS NULL")
-    target_ids = sorted({row["id"] for row in rows} & set(mapping))
-    pairs = [(movie_id, mapping[movie_id]) for movie_id in target_ids]
+        rows = await conn.fetch(
+            "SELECT id, title, year FROM movies "
+            "WHERE poster_url IS NULL AND tmdb_checked_at IS NULL"
+        )
+
+    targets = [
+        (row["id"], mapping.get(row["id"]), row["title"], row["year"])
+        for row in rows
+    ]
+    targets.sort(key=lambda item: item[0])
     if limit is not None:
-        pairs = pairs[: max(0, limit)]
-    return pairs
+        targets = targets[: max(0, limit)]
+    return targets
 
 
 async def enrich(
@@ -148,13 +211,13 @@ async def enrich(
     conn = await asyncpg.connect(dsn_from_url(DATABASE_URL))
     updated = skipped = 0
     try:
-        pairs = await _select_targets(conn, mapping, all_movies, missing_synopsis, limit)
-        if not pairs:
+        targets = await _select_targets(conn, mapping, all_movies, missing_synopsis, limit)
+        if not targets:
             logger.info("Нечего обогащать: подходящих фильмов нет")
             return 0, 0
 
         logger.info(
-            "К обогащению: %s фильмов, concurrency=%s", len(pairs), concurrency
+            "К обогащению: %s фильмов, concurrency=%s", len(targets), concurrency
         )
         semaphore = asyncio.Semaphore(concurrency)
         started = time.perf_counter()
@@ -164,21 +227,27 @@ async def enrich(
         # trust_env=True — уважать системный прокси (реестр Windows / HTTPS_PROXY).
         # Иначе aiohttp игнорирует прокси и падает с «connection refused».
         async with aiohttp.ClientSession(trust_env=True) as http:
-            for start in range(0, len(pairs), DEFAULT_CHUNK):
-                chunk = pairs[start : start + DEFAULT_CHUNK]
+            for start in range(0, len(targets), DEFAULT_CHUNK):
+                chunk = targets[start : start + DEFAULT_CHUNK]
                 results = await asyncio.gather(
                     *(
-                        _fetch_one(http, semaphore, movie_id, tmdb_id, api_key, language,
-                                   fallback_language)
-                        for movie_id, tmdb_id in chunk
+                        _fetch_one(http, semaphore, movie_id, tmdb_id, title, year,
+                                   api_key, language, fallback_language)
+                        for movie_id, tmdb_id, title, year in chunk
                     )
                 )
-                for record in results:
+                for (movie_id, _tmdb_id, _title, _year), (record, definitive) in zip(chunk, results):
                     done += 1
+                    if record is None and not definitive:
+                        # Сетевой сбой — не помечаем, попробуем в следующий раз.
+                        skipped += 1
+                        continue
+
+                    checked_at = datetime.now(timezone.utc) if definitive else None
+                    buffer.append(_as_params(movie_id, record, checked_at))
                     if record is None:
                         skipped += 1
                     else:
-                        buffer.append(_as_params(record))
                         updated += 1
 
                 if len(buffer) >= batch:
@@ -186,10 +255,10 @@ async def enrich(
                     buffer.clear()
 
                 rate = done / max(time.perf_counter() - started, 1e-9)
-                eta = (len(pairs) - done) / max(rate, 1e-9)
+                eta = (len(targets) - done) / max(rate, 1e-9)
                 logger.info(
                     "обогащение: %s/%s (ок %s, пропуск %s) — %.0f фильм/с, осталось ~%.0f мин",
-                    done, len(pairs), updated, skipped, rate, eta / 60,
+                    done, len(targets), updated, skipped, rate, eta / 60,
                 )
 
         if buffer:

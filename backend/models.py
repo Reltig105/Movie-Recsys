@@ -8,8 +8,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import (
     Column,
+    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -50,6 +53,9 @@ class Movie(Base):
     director: Mapped[str | None] = mapped_column(String(255))
     # ``cast_members`` — вместо зарезервированного/встроенного имени ``cast``.
     cast_members: Mapped[str | None] = mapped_column(String(512))
+    # Когда TMDB дал окончательный ответ (200/404). Отличает «постера нет на
+    # TMDB» от «ещё не проверяли», чтобы добор не повторял одни и те же фильмы.
+    tmdb_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     ratings: Mapped[list["Rating"]] = relationship(
         back_populates="movie", cascade="all, delete-orphan"
