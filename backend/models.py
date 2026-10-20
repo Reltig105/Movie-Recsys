@@ -105,7 +105,10 @@ class Rating(Base):
     movie_id: Mapped[int] = mapped_column(
         ForeignKey("movies.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Шкала MovieLens — 0.5…5.0 с шагом 0.5. Целочисленный тип терял бы 31%
+    # оценок (все половинные), поэтому храним как double precision: значения
+    # вида k/2 представляются точно, а asyncpg отдаёт их обычным float.
+    score: Mapped[float] = mapped_column(Float, nullable=False)
     # Время простановки оценки (unix) — нужно для истории и time-based валидации ML.
     timestamp: Mapped[int | None] = mapped_column(Integer, index=True)
 

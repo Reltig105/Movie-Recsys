@@ -27,8 +27,9 @@ Production-порядок загрузки (критично для 32M стро
   MovieLens без логина — нужны для внешнего ключа ``ratings.user_id``);
 * ``ratings`` ← ``data/ratings.csv`` (user_id, movie_id, score, timestamp).
 
-Оценки MovieLens имеют шаг 0.5 и округляются до целого (``0.5 → 1``), так как
-``Rating.score`` — целочисленный.
+Оценки MovieLens имеют шаг 0.5 (0.5…5.0) и сохраняются **без округления**:
+``Rating.score`` объявлен как ``double precision``, поэтому половина оценок
+(31% датасета) не теряется.
 
 Использование::
 
@@ -36,8 +37,11 @@ Production-порядок загрузки (критично для 32M стро
     python -m backend.load_movielens --reset          # пересоздать схему и залить
     python -m backend.load_movielens --movies-only
     python -m backend.load_movielens --ratings-limit 1000000
+    python -m backend.load_movielens --reload-ratings # перезалить ratings, не трогая movies
 
 Полную загрузку выполняйте с ``--reset``: скрипт рассчитан на чистую БД.
+``--reload-ratings`` нужен, когда меняется только содержимое/тип ``ratings``
+(например, возврат половинных оценок) и каталог с TMDB-обогащением сохраняется.
 """
 
 from __future__ import annotations
@@ -111,11 +115,6 @@ def parse_genres(raw: str) -> str:
     if not raw or raw == _NO_GENRES:
         return ""
     return ", ".join(part for part in (g.strip() for g in raw.split("|")) if part)
-
-
-def round_score(value: str) -> int:
-    """Округлить оценку MovieLens (шаг 0.5) до целого, половина — вверх."""
-    return int(float(value) + 0.5)
 
 
 def dsn_from_url(url: str) -> str:
@@ -281,7 +280,7 @@ async def load_ratings(conn: asyncpg.Connection, path: str, limit: int | None) -
                 yield (
                     int(row[user_col]),
                     int(row[movie_col]),
-                    round_score(row[score_col]),
+                    float(row[score_col]),
                     int(row[time_col]),
                 )
         finally:
@@ -307,6 +306,27 @@ async def sync_user_sequence(conn: asyncpg.Connection) -> None:
     )
 
 
+async def reload_ratings(
+    conn: asyncpg.Connection, path: str, limit: int | None
+) -> None:
+    """Очистить ``ratings`` и залить оценки заново, не трогая каталог.
+
+    Нужно, когда меняется только содержимое или тип ``score`` (например,
+    возврат половинных оценок): ``movies`` с TMDB-обогащением остаётся на месте.
+    ``TRUNCATE`` дешевле 32 млн ``DELETE``, а индексы/констрейнты снимаются на
+    время COPY и строятся заново — тем же путём, что при первичной загрузке.
+    """
+    deferred = await capture_deferred_objects(conn)
+    await drop_deferred_objects(conn)
+
+    started = time.perf_counter()
+    await conn.execute("TRUNCATE TABLE ratings")
+    await load_ratings(conn, path, limit)
+    await create_deferred_objects(conn, deferred)
+    await conn.execute("ANALYZE ratings")
+    logger.info("ratings: перезалиты за %.1f с", time.perf_counter() - started)
+
+
 # --------------------------------------------------------------------------- #
 # Оркестрация
 # --------------------------------------------------------------------------- #
@@ -320,6 +340,11 @@ async def run(args: argparse.Namespace) -> int:
 
     conn = await asyncpg.connect(dsn_from_url(DATABASE_URL))
     try:
+        if args.reload_ratings:
+            await reload_ratings(conn, args.ratings_csv, args.ratings_limit)
+            logger.info("Перезаливка ratings завершена")
+            return 0
+
         if not args.ratings_only:
             await load_movies(conn, args.movies_csv)
 
@@ -352,9 +377,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--movies-only", action="store_true", help="только каталог фильмов")
     parser.add_argument("--ratings-only", action="store_true", help="только оценки")
     parser.add_argument("--ratings-limit", type=int, help="ограничить число оценок")
+    parser.add_argument(
+        "--reload-ratings",
+        action="store_true",
+        help="TRUNCATE ratings и залить заново (каталог и users сохраняются)",
+    )
     parser.add_argument("--movies-csv", default=MOVIES_CSV, help="путь к movies.csv")
     parser.add_argument("--ratings-csv", default=RATINGS_CSV, help="путь к ratings.csv")
     args = parser.parse_args(argv)
+
+    if args.reset and args.reload_ratings:
+        parser.error("--reset и --reload-ratings несовместимы")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
     logger.info("База данных: %s", DATABASE_URL)
