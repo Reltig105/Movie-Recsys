@@ -1,0 +1,32 @@
+[Unit]
+Description=Rexter API (FastAPI + uvicorn)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=rexter
+Group=rexter
+WorkingDirectory=/opt/rexter
+EnvironmentFile=/opt/rexter/.env
+Environment=PYTHONUNBUFFERED=1
+
+# --proxy-headers: реальный IP клиента из X-Forwarded-For (нужен rate-limit).
+# --forwarded-allow-ips=127.0.0.1: доверяем заголовку только от Caddy на localhost.
+ExecStart=/opt/rexter/venv/bin/uvicorn backend.api:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1 \
+    --no-server-header
+
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+# 32M строк и REFRESH MATERIALIZED VIEW не должны ронять процесс по OOM раньше
+# системного OOM-killer'а; значение подгоните под RAM сервера.
+MemoryMax=3G
+
+[Install]
+WantedBy=multi-user.target

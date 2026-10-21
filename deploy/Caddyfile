@@ -1,0 +1,28 @@
+# Caddy: HTTPS (Let's Encrypt) и reverse-proxy на uvicorn.
+#
+#   1. Замените домен ниже на свой.
+#   2. sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   3. sudo systemctl reload caddy
+#
+# Статику (frontend/dist) отдаёт сам FastAPI, поэтому проксируется всё:
+# получается один origin и никакого CORS.
+
+rexter.example.com {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	# Постеры лежат на image.tmdb.org — не мешаем кэшировать свои ассеты.
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	log {
+		output file /var/log/caddy/rexter.log
+		format console
+	}
+}
