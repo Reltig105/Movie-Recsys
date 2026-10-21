@@ -14,7 +14,7 @@ function Sidebar({ active = 'recommendations', onNavigate, onLogout }) {
     [
       'flex w-full items-center gap-4 rounded-xl px-5 py-3.5 text-left text-[17px] transition-colors',
       isActive
-        ? "relative bg-[#DCD1C3] font-medium text-gray-900 before:absolute before:left-0 before:top-1/2 before:h-6 before:w-[3px] before:-translate-y-1/2 before:rounded-full before:bg-brown-600 before:content-['']"
+        ? "relative bg-[#DCD1C3] font-medium text-gray-900 before:absolute before:left-0 before:top-1/2 before:h-6 before:w-[3px] before:-translate-y-1/2 before:rounded-full before:bg-[#705d53] before:content-['']"
         : 'bg-transparent text-brown-600/70 hover:bg-[#EBE5DB]/50 hover:text-brown-700',
     ].join(' ')
 

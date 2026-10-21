@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import api from '../api'
+import { pluralize } from '../utils/pluralize'
 
 const WATCH_GOAL = 365
 
@@ -32,6 +33,8 @@ function Profile({ userId = 1 }) {
 
   const watched = profile?.watched_count ?? 0
   const hours = profile?.hours ?? 0
+  const filmWord = pluralize(watched, 'фильм', 'фильма', 'фильмов')
+  const hourWord = pluralize(hours, 'час', 'часа', 'часов')
   const percent = Math.min(100, Math.round((watched / WATCH_GOAL) * 100))
   const history = profile?.history ?? []
   const genres = profile?.favorite_genres ?? []
@@ -170,7 +173,7 @@ function Profile({ userId = 1 }) {
             <div className="mt-7">
               <div className="mb-2 flex items-center justify-between text-sm">
                 <span className="font-medium text-brown-600">
-                  Насмотренность: {watched} фильма
+                  Насмотренность: {watched} {filmWord}
                 </span>
                 <span className="text-brown-400">{percent}%</span>
               </div>
@@ -188,14 +191,14 @@ function Profile({ userId = 1 }) {
               Твой кинобагаж
             </h2>
             <p className="mt-2 text-[15px] text-brown-500">
-              {watched} фильма, {hours} часов
+              {watched} {filmWord}, {hours} {hourWord}
             </p>
 
             <div className="mt-6 flex flex-wrap gap-2">
               {genres.map((genre) => (
                 <span
                   key={genre}
-                  className="rounded-full bg-sand-200 px-4 py-1.5 text-sm font-medium text-brown-600"
+                  className="rounded-full bg-[#e2d7cc] px-4 py-1.5 text-sm font-medium text-[#4a3b32]"
                 >
                   {genre}
                 </span>
@@ -237,7 +240,7 @@ function Profile({ userId = 1 }) {
                           className="h-[170px] w-full object-cover"
                         />
                         {movie.rating != null && (
-                          <span className="absolute right-1.5 top-1.5 rounded-full bg-brown-600/90 px-2 py-0.5 text-[11px] font-semibold text-sand-50">
+                          <span className="absolute right-1.5 top-1.5 rounded-full bg-[#3e322b] px-2 py-0.5 text-[11px] font-semibold text-sand-50">
                             ★ {movie.rating}
                           </span>
                         )}
@@ -284,7 +287,7 @@ function Profile({ userId = 1 }) {
                             setEditingId(movie.id)
                             setRateError(null)
                           }}
-                          className="mt-2 w-full rounded-xl bg-sand-200 py-1.5 text-[11px] font-medium text-brown-600 transition hover:bg-sand-300"
+                          className="mt-2 w-full rounded-xl border border-[#c9bdae] bg-transparent py-1.5 text-[11px] font-medium text-[#705d53] transition-colors hover:border-[#705d53] hover:text-[#4a3b32]"
                         >
                           Изменить оценку
                         </button>

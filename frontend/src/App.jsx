@@ -69,11 +69,11 @@ function App() {
         )}
 
         {section === 'vibe' && (
-          <Placeholder
-            icon="✨"
-            title="Кино по вайбу"
-            text="Опишите настроение словами — например, «дождливый неонуар под меланхолию» — и мы подберём кино."
-          />
+          <div className="flex flex-1 items-center justify-center px-8 text-center">
+            <p className="max-w-md text-lg font-medium leading-relaxed text-brown-600">
+              Сейчас тут пусто, но скоро здесь появится что то очень крутое
+            </p>
+          </div>
         )}
 
         {section === 'search' && (
