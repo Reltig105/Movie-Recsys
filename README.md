@@ -223,7 +223,6 @@ Redis в Docker, наружу не открыты. Пошаговая инстр
 
 ## Документы
 
-- [DESIGN.md](DESIGN.md) — исходный system design; часть решений устарела
-  (сейчас PostgreSQL вместо SQLite и LightFM/FAISS вместо Qdrant).
+- [DESIGN.md](DESIGN.md) — как устроены данные, офлайн-обучение и онлайн-выдача.
 - [LOG.md](LOG.md) — журнал разработки с найденными проблемами.
 - [deploy/README.md](deploy/README.md) — установка на VPS.
