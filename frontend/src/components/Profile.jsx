@@ -1,72 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import api from '../api'
 
-const SLIDERS = [
-  {
-    id: 'mood',
-    label: 'Настроение',
-    min: 0,
-    max: 100,
-    labels: ['Спокойное', 'Тёплое', 'Бодрое'],
-  },
-  {
-    id: 'risk',
-    label: 'Степень риска',
-    min: 0,
-    max: 100,
-    labels: ['Проверенное', 'Смелое', 'Экспериментальное'],
-  },
-  {
-    id: 'dynamics',
-    label: 'Динамика',
-    min: 0,
-    max: 100,
-    labels: ['Размеренная', 'Умеренная', 'Стремительная'],
-  },
-  {
-    id: 'era',
-    label: 'Эпоха',
-    min: 1950,
-    max: 2020,
-    labels: ['Ретро', 'Классика', 'Современное'],
-  },
-]
-
 const WATCH_GOAL = 365
-
-/** Подбираем изящную текстовую подпись под текущее значение ползунка. */
-function sliderLabel(slider, value) {
-  const ratio = (value - slider.min) / (slider.max - slider.min)
-  const index = Math.min(
-    slider.labels.length - 1,
-    Math.max(0, Math.floor(ratio * slider.labels.length)),
-  )
-  return slider.labels[index]
-}
-
-function Slider({ slider, value, onChange }) {
-  return (
-    <div>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-medium text-brown-600">
-          {slider.label}
-        </span>
-        <span className="text-sm font-medium text-brown-500">
-          {sliderLabel(slider, value)}
-        </span>
-      </div>
-      <input
-        type="range"
-        min={slider.min}
-        max={slider.max}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        aria-label={slider.label}
-        className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-sand-200 accent-clay-500"
-      />
-    </div>
-  )
-}
 
 function Profile({ userId = 1 }) {
   const [profile, setProfile] = useState(null)
@@ -76,12 +11,6 @@ function Profile({ userId = 1 }) {
   const [rateError, setRateError] = useState(null)
   const historyRef = useRef(null)
   const [scrollState, setScrollState] = useState({ value: 0, max: 0 })
-  const [settings, setSettings] = useState({
-    mood: 55,
-    risk: 30,
-    dynamics: 65,
-    era: 1995,
-  })
 
   useEffect(() => {
     let cancelled = false
@@ -182,9 +111,6 @@ function Profile({ userId = 1 }) {
     setScrollState({ value: next, max })
   }
 
-  const updateSetting = (id, value) =>
-    setSettings((prev) => ({ ...prev, [id]: value }))
-
   const handleRate = async (movieId, value) => {
     setSavingId(movieId)
     setRateError(null)
@@ -280,22 +206,6 @@ function Profile({ userId = 1 }) {
 
         {/* Right column */}
         <div className="flex flex-col gap-8">
-          <div className="rounded-3xl bg-sand-50 p-7 shadow-[0_14px_36px_rgba(107,79,58,0.10)]">
-            <h2 className="mb-6 text-lg font-semibold text-brown-700">
-              Настрой свою киноленту
-            </h2>
-            <div className="flex flex-col gap-6">
-              {SLIDERS.map((slider) => (
-                <Slider
-                  key={slider.id}
-                  slider={slider}
-                  value={settings[slider.id]}
-                  onChange={(value) => updateSetting(slider.id, value)}
-                />
-              ))}
-            </div>
-          </div>
-
           <div className="rounded-3xl bg-sand-50 p-7 shadow-[0_14px_36px_rgba(107,79,58,0.10)]">
             <h2 className="mb-5 text-lg font-semibold text-brown-700">
               История твоих оценок

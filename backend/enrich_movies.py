@@ -1,8 +1,8 @@
 """Массовое обогащение каталога фильмов метаданными TMDB — полностью async.
 
 Читает официальный ``data/links.csv`` (``movieId`` → ``tmdbId``) и параллельно
-подтягивает постеры, синопсисы, режиссёра и актёров, обновляя строки ``movies``
-(их создаёт :mod:`backend.load_movielens`).
+подтягивает постеры, синопсисы, режиссёра, актёров и страны производства,
+обновляя строки ``movies`` (их создаёт :mod:`backend.load_movielens`).
 
 Архитектура:
 
@@ -34,6 +34,7 @@
 
     python -m backend.enrich_movies                  # только фильмы без постера
     python -m backend.enrich_movies --missing        # постер или описание отсутствуют
+    python -m backend.enrich_movies --countries      # добор стран производства
     python -m backend.enrich_movies --concurrency 40
     python -m backend.enrich_movies --limit 500
     python -m backend.enrich_movies --all            # переобработать весь каталог
@@ -87,7 +88,8 @@ _UPDATE_SQL = """
            synopsis = COALESCE(NULLIF($6, ''), synopsis),
            director = COALESCE(NULLIF($7, ''), director),
            cast_members = COALESCE(NULLIF($8, ''), cast_members),
-           tmdb_checked_at = COALESCE($9, tmdb_checked_at)
+           country = COALESCE(NULLIF($9, ''), country),
+           tmdb_checked_at = COALESCE($10, tmdb_checked_at)
      WHERE id = $1
 """
 
@@ -99,7 +101,7 @@ def _as_params(
 ) -> tuple:
     """Преобразовать :class:`MovieRecord` (или пустой результат) в параметры UPDATE."""
     if record is None:
-        return (movie_id, None, None, None, None, None, None, None, checked_at)
+        return (movie_id, None, None, None, None, None, None, None, None, checked_at)
     return (
         record.id,
         record.title,
@@ -109,6 +111,7 @@ def _as_params(
         record.synopsis,
         record.director,
         record.cast_members,
+        record.country,
         checked_at,
     )
 
@@ -123,11 +126,13 @@ async def _fetch_one(
     api_key: str,
     language: str,
     fallback_language: str | None,
+    allow_search: bool = True,
 ) -> tuple[MovieRecord | None, bool]:
     """Скачать и разобрать один фильм под ограничением семафора.
 
     Возвращает ``(record, definitive)``: ``definitive`` — TMDB дал окончательный
-    ответ, повторять не нужно.
+    ответ, повторять не нужно. ``allow_search=False`` отключает добор по
+    названию: для стран производства достаточно ответа ``/movie/{tmdbId}``.
     """
     record: MovieRecord | None = None
     legs: list[bool] = []  # окончательность каждого выполненного запроса
@@ -142,8 +147,10 @@ async def _fetch_one(
                 record = parse_movie(movie_id, payload)
 
         # Добор по названию: и когда ссылки нет, и когда у основной записи нет
-        # постера или описания.
-        if record is None or not record.poster_url or not record.synopsis:
+        # постера или описания. При доборе только стран он не нужен.
+        if allow_search and (
+            record is None or not record.poster_url or not record.synopsis
+        ):
             alt_payload, alt_definitive = await search_movie_result(
                 http, title, year, api_key, language,
                 fallback_language=fallback_language,
@@ -164,13 +171,21 @@ async def _select_targets(
     all_movies: bool,
     missing_synopsis: bool,
     limit: int | None,
+    countries_only: bool = False,
 ) -> list[tuple[int, int | None, str, int | None]]:
     """Определить список ``(movieId, tmdbId, title, year)`` для обработки.
 
     Фильмы без ``tmdbId`` тоже попадают в выборку — их ищут по названию и году.
-    Уже проверенные (``tmdb_checked_at``) повторно не берутся.
+    Уже проверенные (``tmdb_checked_at``) повторно не берутся. В режиме
+    ``countries_only`` выбираются фильмы без страны производства — независимо
+    от того, когда их проверяли: колонка появилась позже остальных метаданных.
     """
-    if all_movies:
+    if countries_only:
+        rows = await conn.fetch(
+            "SELECT id, title, year FROM movies "
+            "WHERE country IS NULL OR country = ''"
+        )
+    elif all_movies:
         rows = await conn.fetch("SELECT id, title, year FROM movies")
     elif missing_synopsis:
         rows = await conn.fetch(
@@ -200,6 +215,7 @@ async def enrich(
     links_path: str = LINKS_CSV,
     all_movies: bool = False,
     missing_synopsis: bool = False,
+    countries_only: bool = False,
     limit: int | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     batch: int = DEFAULT_BATCH,
@@ -214,7 +230,9 @@ async def enrich(
     conn = await asyncpg.connect(dsn_from_url(DATABASE_URL))
     updated = skipped = 0
     try:
-        targets = await _select_targets(conn, mapping, all_movies, missing_synopsis, limit)
+        targets = await _select_targets(
+            conn, mapping, all_movies, missing_synopsis, limit, countries_only
+        )
         if not targets:
             logger.info("Нечего обогащать: подходящих фильмов нет")
             return 0, 0
@@ -235,7 +253,8 @@ async def enrich(
                 results = await asyncio.gather(
                     *(
                         _fetch_one(http, semaphore, movie_id, tmdb_id, title, year,
-                                   api_key, language, fallback_language)
+                                   api_key, language, fallback_language,
+                                   allow_search=not countries_only)
                         for movie_id, tmdb_id, title, year in chunk
                     )
                 )
@@ -283,6 +302,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--all", action="store_true", help="обрабатывать все фильмы (не только без постера)")
     parser.add_argument(
+        "--countries", action="store_true",
+        help="добрать страны производства для фильмов, где колонка пуста",
+    )
+    parser.add_argument(
         "--missing", action="store_true",
         help="добирать фильмы без постера ИЛИ без описания (с англ. фолбэком)",
     )
@@ -318,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                 links_path=args.links,
                 all_movies=args.all,
                 missing_synopsis=args.missing,
+                countries_only=args.countries,
                 limit=args.limit,
                 concurrency=args.concurrency,
                 batch=args.batch,

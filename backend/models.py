@@ -48,6 +48,9 @@ class Movie(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     year: Mapped[int | None] = mapped_column(Integer)
     genres: Mapped[str | None] = mapped_column(String(255))
+    # Страны производства — коды ISO 3166-1 через запятую (``US,GB``). Коды
+    # устойчивее названий, а русские подписи собираются в backend/countries.py.
+    country: Mapped[str | None] = mapped_column(String(120))
     poster_url: Mapped[str | None] = mapped_column(String(512))
     synopsis: Mapped[str | None] = mapped_column(Text)
     director: Mapped[str | None] = mapped_column(String(255))

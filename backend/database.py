@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -92,6 +93,12 @@ async def init_db() -> None:
 
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        # ``create_all`` не меняет существующие таблицы. Колонка страны
+        # появилась вместе с фильтрами ленты, поэтому старые базы догоняем
+        # идемпотентным ALTER, а не требуем отдельный инструмент миграций.
+        await connection.execute(
+            text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS country varchar(120)")
+        )
 
 
 async def dispose() -> None:

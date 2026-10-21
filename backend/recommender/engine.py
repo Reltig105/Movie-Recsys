@@ -249,6 +249,29 @@ class RecommenderEngine:
         top = top[np.argsort(-scores[top])]
         return top, scores[top]
 
+    def _search_allowed(
+        self,
+        vector: np.ndarray,
+        k: int,
+        positions: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Топ-``k`` только среди разрешённых позиций каталога.
+
+        FAISS ``IndexFlatIP`` не умеет фильтровать по подмножеству, а брать
+        верхушку полного поиска нельзя: фильм нужной страны может лежать ниже.
+        Поэтому при активных фильтрах считаем скалярное произведение по всем
+        87 585 векторам (5,7 млн умножений) и выбираем из маски.
+        """
+        k = max(1, min(k, int(positions.size)))
+        scores = self._item_vectors @ np.asarray(vector, dtype=np.float32)
+        subset = scores[positions]
+        if positions.size <= k:
+            order = np.argsort(-subset)
+            return positions[order], subset[order]
+        top = np.argpartition(-subset, k - 1)[:k]
+        top = top[np.argsort(-subset[top])]
+        return positions[top], subset[top]
+
     def _lookup_user(self, user_id: int) -> int | None:
         position = int(np.searchsorted(self._user_ids, user_id))
         if position < self._user_ids.size and int(self._user_ids[position]) == user_id:
@@ -332,17 +355,34 @@ class RecommenderEngine:
         exclude_ids: set[int] | None = None,
         unavailable: frozenset[int] | set[int] = frozenset(),
         seed: int | None = None,
+        allowed_ids: set[int] | None = None,
     ) -> list[ScoredItem] | None:
         """Собрать ``top_k`` рекомендаций.
 
-        ``None`` — персональный профиль построить нельзя (нет ни обученного
-        вектора, ни оценок); вызывающий код откатывается на популярное.
+        ``allowed_ids`` ограничивает пул кандидатов (фильтры ленты); ``None`` —
+        без ограничений. ``None`` в результате — персональный профиль построить
+        нельзя (нет ни обученного вектора, ни оценок); вызывающий код
+        откатывается на популярное.
         """
         top_k = max(1, int(top_k))
         profile = await self._profile(session, user_id)
         if profile is None:
             return None
         vector, user_bias = profile
+
+        allowed_positions: np.ndarray | None = None
+        if allowed_ids is not None:
+            if not allowed_ids:
+                return None
+            allowed = np.fromiter(
+                allowed_ids, dtype=np.int64, count=len(allowed_ids)
+            )
+            positions = np.searchsorted(self._movie_ids, allowed)
+            positions = np.clip(positions, 0, self.n_items - 1)
+            found = self._movie_ids[positions] == allowed
+            allowed_positions = np.unique(positions[found])
+            if allowed_positions.size == 0:
+                return None
 
         excluded: set[int] = set(unavailable)
         if exclude_ids:
@@ -354,7 +394,10 @@ class RecommenderEngine:
             self.n_items,
             max(SEARCH_POOL, top_k * 10, len(excluded) + CANDIDATE_LIMIT),
         )
-        indices, scores = self._search(vector, k)
+        if allowed_positions is not None:
+            indices, scores = self._search_allowed(vector, k, allowed_positions)
+        else:
+            indices, scores = self._search(vector, k)
 
         candidates: list[ScoredItem] = []
         for index, score in zip(indices.tolist(), scores.tolist()):

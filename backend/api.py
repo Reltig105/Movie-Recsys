@@ -18,7 +18,8 @@
 * ``GET  /recommend/{user_id}``      — рекомендации (hot/cold start);
 * ``GET  /api/v1/calibration-movies``— фильмы для онбординга;
 * ``POST /api/v1/rate``              — оценка из v1-фронтенда;
-* ``GET  /api/v1/feed``              — лента-карусель;
+* ``GET  /api/v1/feed``              — лента-карусель (с фильтрами);
+* ``GET  /api/v1/filters``           — страны, жанры и годы для фильтров;
 * ``GET  /api/v1/profile``           — профиль (статистика/жанры/история).
 
 Запись оценок и личные данные (профиль, история) требуют заголовок
@@ -44,7 +45,7 @@ import os
 import random
 import secrets
 import time
-from collections import deque
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List
@@ -55,9 +56,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .countries import country_label
 from .database import SessionLocal, dispose, get_session, init_db
 from .models import Movie, Rating, User, movie_stats
 from .recommender import RecommenderEngine
@@ -243,6 +245,7 @@ class MovieOut(BaseModel):
     title: str
     year: int | None = None
     genres: str | None = None
+    country: str | None = None
     poster_url: str | None = None
     synopsis: str | None = None
     director: str | None = None
@@ -269,6 +272,23 @@ class FeedMovie(BaseModel):
     poster_url: str
     score: float
     synopsis: str = ""
+
+
+class CountryOption(BaseModel):
+    """Страна производства в списке фильтров."""
+
+    code: str
+    name: str
+    count: int
+
+
+class FeedFilters(BaseModel):
+    """Доступные значения фильтров для ленты."""
+
+    countries: list[CountryOption]
+    genres: list[str]
+    year_min: int | None
+    year_max: int | None
 
 
 class ProfileMovie(BaseModel):
@@ -756,12 +776,146 @@ async def api_rate(
     return {"status": "success"}
 
 
+def _feed_filter_clauses(
+    country: str | None,
+    genre: str | None,
+    year_from: int | None,
+    year_to: int | None,
+) -> list:
+    """SQL-условия ленты по стране, жанру и году выпуска.
+
+    Страны хранятся кодами через запятую (``US,GB``), жанры — русскими
+    названиями через запятую. Разбор через ``string_to_array`` даёт точное
+    совпадение: подстрока «драма» не поймает «мелодраму».
+    """
+    clauses = []
+    if country:
+        clauses.append(
+            text(
+                "EXISTS (SELECT 1 FROM unnest(string_to_array(movies.country, ',')) "
+                "AS movie_country WHERE btrim(movie_country) = :country)"
+            ).bindparams(country=country)
+        )
+    if genre:
+        clauses.append(
+            text(
+                "EXISTS (SELECT 1 FROM unnest(string_to_array(movies.genres, ',')) "
+                "AS feed_genre WHERE btrim(feed_genre) = :genre)"
+            ).bindparams(genre=genre)
+        )
+    if year_from is not None:
+        clauses.append(Movie.year >= year_from)
+    if year_to is not None:
+        clauses.append(Movie.year <= year_to)
+    return clauses
+
+
+async def _filtered_movie_ids(
+    session: AsyncSession,
+    country: str | None,
+    genre: str | None,
+    year_from: int | None,
+    year_to: int | None,
+) -> set[int]:
+    """Идентификаторы фильмов, проходящих фильтры ленты."""
+    statement = select(Movie.id).where(
+        RECOMMENDABLE,
+        *_feed_filter_clauses(country, genre, year_from, year_to),
+    )
+    return set((await session.scalars(statement)).all())
+
+
+@app.get("/api/v1/filters", response_model=FeedFilters)
+async def api_filters(
+    session: AsyncSession = Depends(get_session),
+) -> FeedFilters:
+    """Справочники для панели фильтров: страны, жанры и границы годов."""
+    # Разбор строки через unnest выполняет PostgreSQL: передавать 87 тысяч
+    # строк в Python и дробить их там заметно дороже (~600 мс против ~90 мс).
+    country_counts: Counter[str] = Counter()
+    country_rows = (
+        await session.execute(
+            text(
+                "SELECT upper(btrim(code)) AS code, count(*) AS count "
+                "FROM movies, unnest(string_to_array(movies.country, ',')) AS code "
+                "WHERE movies.poster_url IS NOT NULL "
+                "  AND movies.country IS NOT NULL AND movies.country <> '' "
+                "GROUP BY 1"
+            )
+        )
+    ).all()
+    country_counts.update(
+        {row.code: int(row.count) for row in country_rows if row.code}
+    )
+
+    # У исторических кодов (CS/XC) одна русская подпись — оставляем один код.
+    by_label: dict[str, list] = {}
+    for code, count in country_counts.items():
+        label = country_label(code)
+        # В production_countries TMDB иногда кладёт языковые коды (UR, EO, IK, YI).
+        # Это не страны: в фильтрах им делать нечего, реальная страна фильма
+        # обычно указана рядом.
+        if label == code:
+            continue
+        entry = by_label.setdefault(label, [code, 0, 0])
+        entry[1] += count
+        if count > entry[2]:
+            entry[0] = code
+            entry[2] = count
+    countries = [
+        CountryOption(code=code, name=label, count=total)
+        for label, (code, total, _) in sorted(
+            by_label.items(), key=lambda item: (-item[1][1], item[0])
+        )
+    ]
+
+    genre_counts: Counter[str] = Counter()
+    genre_rows = (
+        await session.execute(
+            text(
+                "SELECT btrim(genre) AS genre, count(*) AS count "
+                "FROM movies, unnest(string_to_array(movies.genres, ',')) AS genre "
+                "WHERE movies.poster_url IS NOT NULL AND movies.genres IS NOT NULL "
+                "GROUP BY 1"
+            )
+        )
+    ).all()
+    genre_counts.update(
+        {row.genre: int(row.count) for row in genre_rows if row.genre}
+    )
+    genres = [
+        name
+        for name, _ in sorted(
+            genre_counts.items(), key=lambda item: (-item[1], item[0])
+        )
+    ]
+
+    bounds = (
+        await session.execute(
+            select(func.min(Movie.year), func.max(Movie.year)).where(
+                RECOMMENDABLE, Movie.year.is_not(None)
+            )
+        )
+    ).one()
+
+    return FeedFilters(
+        countries=countries,
+        genres=genres,
+        year_min=bounds[0],
+        year_max=bounds[1],
+    )
+
+
 @app.get("/api/v1/feed", response_model=list[FeedMovie])
 async def api_feed(
     user_id: int = 1,
     top_k: int = 7,
     seed: int | None = None,
     exclude_ids: str | None = None,
+    country: str | None = None,
+    genre: str | None = None,
+    year_from: int | None = None,
+    year_to: int | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[FeedMovie]:
     """``top_k`` фильмов для главной карусели.
@@ -770,13 +924,33 @@ async def api_feed(
     exploit/explore. Из ``ratings`` читается только индексная выборка «что
     пользователь уже оценил» (без агрегаций по 32M строк). Если артефактов
     модели нет, лента собирается из ``movie_stats``, как раньше.
+
+    ``country`` (код ISO), ``genre`` и ``year_from``/``year_to`` ограничивают
+    пул кандидатов. С фильтрами поиск идёт по всем разрешённым векторам сразу,
+    а не по верхушке FAISS: иначе редкая страна могла бы не попасть в топ.
     """
     top_k = max(1, min(int(top_k), MAX_LIMIT))
+    country = (country.strip().upper() or None) if country else None
+    genre = (genre.strip() or None) if genre else None
+    # Не даём экстремальным значениям из URL выйти за int32 PostgreSQL.
+    year_from = max(1800, min(2200, year_from)) if year_from is not None else None
+    year_to = max(1800, min(2200, year_to)) if year_to is not None else None
     hidden = (
         {int(part) for part in exclude_ids.split(",") if part.strip().isdigit()}
         if exclude_ids
         else set()
     )
+
+    filtered = any(
+        value is not None for value in (country, genre, year_from, year_to)
+    )
+    allowed_ids: set[int] | None = None
+    if filtered:
+        allowed_ids = await _filtered_movie_ids(
+            session, country, genre, year_from, year_to
+        )
+        if not allowed_ids:
+            return []
 
     if _ENGINE is not None:
         items = await _ENGINE.recommend(
@@ -786,6 +960,7 @@ async def api_feed(
             exclude_ids=hidden,
             unavailable=_UNAVAILABLE,
             seed=seed,
+            allowed_ids=allowed_ids,
         )
         if items:
             movies = await _movies_by_ids(session, [item.movie_id for item in items])
@@ -813,7 +988,11 @@ async def api_feed(
     statement = (
         select(Movie, movie_stats.c.avg_rating, movie_stats.c.ratings_count)
         .join(movie_stats, movie_stats.c.movie_id == Movie.id)
-        .where(RECOMMENDABLE, movie_stats.c.ratings_count >= FEED_MIN_RATINGS)
+        .where(
+            RECOMMENDABLE,
+            movie_stats.c.ratings_count >= FEED_MIN_RATINGS,
+            *_feed_filter_clauses(country, genre, year_from, year_to),
+        )
         .order_by(
             movie_stats.c.avg_rating.desc(),
             movie_stats.c.ratings_count.desc(),

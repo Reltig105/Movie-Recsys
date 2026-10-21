@@ -42,6 +42,7 @@ SYNOPSIS_MAX_SENTENCES = 4
 # падает с ``StringDataRightTruncationError``.
 TITLE_MAX = 255
 GENRES_MAX = 255
+COUNTRY_MAX = 120
 DIRECTOR_MAX = 255
 CAST_MAX = 512
 POSTER_MAX = 512
@@ -62,6 +63,7 @@ class MovieRecord:
     title: str
     year: int | None
     genres: str
+    country: str
     poster_url: str | None
     synopsis: str
     director: str
@@ -100,6 +102,25 @@ def extract_cast(credits: dict, size: int = CAST_SIZE) -> str:
     cast = credits.get("cast") or []
     names = [member.get("name", "") for member in cast[:size]]
     return ", ".join(name for name in names if name)
+
+
+def extract_countries(payload: dict) -> str:
+    """Коды стран производства через запятую (ISO 3166-1).
+
+    ``production_countries`` — основной источник; ``origin_country`` добавляет
+    страны совместного производства, которых нет в первом списке. Порядок
+    сохраняется, дубликаты убираются.
+    """
+    codes: list[str] = []
+    for item in payload.get("production_countries") or []:
+        code = (item.get("iso_3166_1") or "").strip().upper()
+        if code and code not in codes:
+            codes.append(code)
+    for value in payload.get("origin_country") or []:
+        code = (value or "").strip().upper()
+        if code and code not in codes:
+            codes.append(code)
+    return ",".join(codes)
 
 
 def _clean_title(title: str) -> str:
@@ -142,6 +163,9 @@ def _payload_to_record(movielens_id: int, payload: dict) -> MovieRecord:
         title=_clip(title, TITLE_MAX, "title", movielens_id),
         year=year,
         genres=_clip(genres, GENRES_MAX, "genres", movielens_id),
+        country=_clip(
+            extract_countries(payload), COUNTRY_MAX, "country", movielens_id
+        ),
         poster_url=poster_url,
         synopsis=truncate_synopsis(payload.get("overview") or ""),
         director=_clip(extract_director(credits), DIRECTOR_MAX, "director", movielens_id),
@@ -163,6 +187,7 @@ def merge_records(primary: MovieRecord, extra: MovieRecord) -> MovieRecord:
         primary,
         year=primary.year or extra.year,
         genres=primary.genres or extra.genres,
+        country=primary.country or extra.country,
         poster_url=primary.poster_url or extra.poster_url,
         synopsis=primary.synopsis or extra.synopsis,
         director=primary.director or extra.director,
