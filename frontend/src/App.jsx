@@ -1,20 +1,10 @@
 import { useEffect, useState } from 'react'
+import api from './api'
+import { clearSession, loadSession, saveSession } from './session'
 import Onboarding from './components/Onboarding'
 import Sidebar from './components/Sidebar'
 import CarouselFeed from './components/CarouselFeed'
 import Profile from './components/Profile'
-
-const STORAGE_KEY = 'kinolenta:session'
-
-/** Читаем сохранённую сессию: онбординг запрашиваем только при первом заходе. */
-function loadSession() {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : null
-  } catch {
-    return null
-  }
-}
 
 function Placeholder({ icon, title, text }) {
   return (
@@ -29,40 +19,35 @@ function Placeholder({ icon, title, text }) {
 }
 
 function App() {
-  const saved = loadSession()
-  const [hasOnboarded, setHasOnboarded] = useState(
-    () => Boolean(saved?.hasOnboarded),
-  )
-  const [currentUserId, setCurrentUserId] = useState(() => saved?.userId ?? 1)
+  const [session, setSession] = useState(loadSession)
+  // Старые сохранения без токена бесполезны: сервер отклонит запросы на запись,
+  // поэтому такого пользователя отправляем пройти онбординг заново.
+  const [hasOnboarded, setHasOnboarded] = useState(() => {
+    const saved = loadSession()
+    return Boolean(saved?.hasOnboarded && saved?.token)
+  })
   const [section, setSection] = useState('recommendations')
 
   // Сохраняем прогресс, чтобы после перезагрузки не проходить онбординг заново.
   useEffect(() => {
-    try {
-      window.localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ hasOnboarded, userId: currentUserId }),
-      )
-    } catch {
-      // localStorage может быть недоступен (приватный режим) — просто игнорируем.
-    }
-  }, [hasOnboarded, currentUserId])
+    if (session) saveSession({ ...session, hasOnboarded })
+  }, [session, hasOnboarded])
 
-  const handleComplete = (userId) => {
-    if (userId != null) setCurrentUserId(userId)
+  const handleComplete = (next) => {
+    setSession(next)
     setHasOnboarded(true)
   }
 
   const handleLogout = () => {
-    try {
-      window.localStorage.removeItem(STORAGE_KEY)
-    } catch {
-      // ignore
-    }
+    // Гасим токен на сервере; если сети нет — всё равно выходим локально.
+    api.post('/logout').catch(() => {})
+    clearSession()
+    setSession(null)
     setHasOnboarded(false)
-    setCurrentUserId(1)
     setSection('recommendations')
   }
+
+  const currentUserId = session?.userId ?? 1
 
   if (!hasOnboarded) {
     return <Onboarding onComplete={handleComplete} />

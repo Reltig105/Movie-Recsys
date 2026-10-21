@@ -32,6 +32,7 @@ movie-recsys/
 │   └── requirements.txt          # fastapi, uvicorn, sqlalchemy, asyncpg, aiohttp, pydantic
 ├── api.py                        # Шим: реэкспорт backend.api:app
 ├── docker-compose.yml            # PostgreSQL 16 (rexter_db)
+├── deploy/                       # Прод: Caddyfile, systemd-юнит, compose для VPS
 ├── app.py                        # Streamlit-интерфейс (пока на mock-заглушке)
 ├── requirements.txt
 ├── DESIGN.md                     # System Design: цели, метрики, архитектура, схема данных
@@ -183,21 +184,40 @@ python -m backend.refresh_stats
 | --- | --- | --- |
 | `GET` | `/health` | Health-check |
 | `GET` | `/api/v1/movies?limit=` | Первые N фильмов (смоук-тест данных) |
-| `POST` | `/register` | Регистрация пользователя |
-| `POST` | `/login` | Вход (проверка пароля) |
+| `POST` | `/register` | Регистрация пользователя (выдаёт `session_token`) |
+| `POST` | `/login` | Вход (проверка пароля, выдаёт `session_token`) |
+| `POST` | `/logout` | Выход: токен гасится в БД 🔒 |
 | `GET` | `/user/{user_id}` | Профиль пользователя |
-| `POST` | `/rate` | Сохранить оценку (upsert) |
-| `GET` | `/user/{user_id}/history` | История оценок |
+| `POST` | `/rate` | Сохранить оценку (upsert) 🔒 |
+| `GET` | `/user/{user_id}/history` | История оценок 🔒 |
 | `GET` | `/search?query=` | Поиск фильмов по названию |
 | `GET` | `/recommend/{user_id}` | Рекомендации (hot/cold start) |
 | `GET` | `/api/v1/calibration-movies` | Фильмы для онбординга |
-| `POST` | `/api/v1/rate` | Оценка из v1-фронтенда |
+| `POST` | `/api/v1/rate` | Оценка из v1-фронтенда 🔒 |
 | `GET` | `/api/v1/feed` | Лента-карусель |
-| `GET` | `/api/v1/profile` | Профиль: статистика, жанры, история |
+| `GET` | `/api/v1/profile` | Профиль: статистика, жанры, история 🔒 |
+
+🔒 — нужен заголовок `X-Session-Token` (токен из `/register` или `/login`), и
+только для своей учётной записи. Каталог (лента, рекомендации, поиск) открыт.
 
 Корневой `api.py` — тонкий шим, реэкспортирующий `backend.api:app`, поэтому
 запуск `uvicorn api:app` также работает. Пароли хранятся как PBKDF2-HMAC-SHA256
 (только stdlib), схема создаётся автоматически на старте приложения.
+
+## 🚀 Публикация в интернете
+
+Полная инструкция по VPS — в [deploy/README.md](deploy/README.md) (DNS, Caddy с
+авто-HTTPS, systemd, перенос базы дампом). Кратко, что уже подготовлено:
+
+- FastAPI раздаёт собранный фронтенд из `frontend/dist` с SPA-fallback —
+  один origin, без CORS (`npm run build` в `frontend/`);
+- `frontend/src/api.js` использует относительный адрес API, а Vite в dev
+  проксирует те же пути в uvicorn (`server.proxy`), поэтому `npm run dev`
+  работает без настройки;
+- запись оценок, профиль и история защищены токеном (`X-Session-Token`),
+  вход/регистрация ограничены 10 попытками в минуту с IP;
+- `deploy/`: `docker-compose.prod.yml` (Postgres только на `127.0.0.1`),
+  `Caddyfile`, `rexter.service`; секреты — в `.env` (образец `.env.example`).
 
 ## 🧩 Офлайн-данные для LightFM (`backend/ml_pipeline`)
 

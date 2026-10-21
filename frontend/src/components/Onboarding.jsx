@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import api from '../api'
+import { saveSession } from '../session'
 
 const REACTIONS = [
   { label: '🔥 Топчик', value: 5 },
@@ -47,6 +48,7 @@ function Onboarding({ onComplete }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [userId, setUserId] = useState(1)
+  const [token, setToken] = useState(null)
   const [authError, setAuthError] = useState(null)
   const [busy, setBusy] = useState(false)
 
@@ -81,7 +83,7 @@ function Onboarding({ onComplete }) {
       username: username.trim(),
       password,
     })
-    return data?.user_id
+    return data
   }
 
   const handleSubmitAuth = async (event) => {
@@ -94,22 +96,30 @@ function Onboarding({ onComplete }) {
     setBusy(true)
     setAuthError(null)
     try {
-      let id
+      let auth
       try {
-        id = await tryAuth(mode === 'register' ? '/register' : '/login')
+        auth = await tryAuth(mode === 'register' ? '/register' : '/login')
       } catch (error) {
         // Логин занят — пробуем войти, чтобы не блокировать пользователя.
         if (mode === 'register') {
-          id = await tryAuth('/login')
+          auth = await tryAuth('/login')
         } else {
           throw error
         }
       }
-      if (id == null) {
+      if (auth?.user_id == null || !auth.session_token) {
         setAuthError('Сервер не вернул идентификатор пользователя')
         return
       }
-      setUserId(id)
+      const account = {
+        userId: auth.user_id,
+        username: auth.username ?? username.trim(),
+        token: auth.session_token,
+      }
+      setUserId(account.userId)
+      setToken(account.token)
+      // Токен нужен сразу: калибровка ставит оценки до конца онбординга.
+      saveSession({ ...account, hasOnboarded: false })
       setStep('welcome')
     } catch (error) {
       console.error('Ошибка авторизации:', error)
@@ -303,7 +313,7 @@ function Onboarding({ onComplete }) {
           </p>
           <button
             type="button"
-            onClick={() => onComplete(userId)}
+            onClick={() => onComplete({ userId, username: username.trim(), token })}
             className="mt-10 w-full rounded-2xl bg-clay-500 px-8 py-4 text-[15px] font-bold text-white shadow-[0_12px_28px_rgba(201,123,90,0.35)] transition hover:bg-clay-600"
           >
             Погнали! 🚀

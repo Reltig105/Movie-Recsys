@@ -50,12 +50,16 @@ function Auth({ onLogin }) {
         password,
       })
 
-      if (data?.user_id == null) {
+      if (data?.user_id == null || !data.session_token) {
         setError('Сервер не вернул идентификатор пользователя')
         return
       }
 
-      onLogin(data.user_id)
+      onLogin({
+        userId: data.user_id,
+        username: data.username ?? username.trim(),
+        token: data.session_token,
+      })
     } catch (err) {
       console.error('Ошибка авторизации:', err)
       setError(extractErrorMessage(err))

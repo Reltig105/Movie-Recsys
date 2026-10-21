@@ -8,8 +8,9 @@
 
 * ``GET  /health``                   — health-check;
 * ``GET  /api/v1/movies``            — первые N фильмов (смоук-тест данных);
-* ``POST /register``                 — регистрация;
-* ``POST /login``                    — вход;
+* ``POST /register``                 — регистрация (возвращает токен сессии);
+* ``POST /login``                    — вход (возвращает токен сессии);
+* ``POST /logout``                   — выход (аннулирует токен);
 * ``GET  /user/{user_id}``           — профиль пользователя;
 * ``POST /rate``                     — сохранить оценку;
 * ``GET  /user/{user_id}/history``   — история оценок;
@@ -20,10 +21,17 @@
 * ``GET  /api/v1/feed``              — лента-карусель;
 * ``GET  /api/v1/profile``           — профиль (статистика/жанры/история).
 
+Запись оценок и личные данные (профиль, история) требуют заголовок
+``X-Session-Token`` с токеном, который выдают ``/register`` и ``/login``.
+Каталог (лента, рекомендации, поиск) открыт без авторизации.
+
+В продакшене тот же процесс отдаёт собранный фронтенд из ``frontend/dist``
+(SPA-fallback), поэтому CORS не нужен: браузер и API живут на одном origin.
+
 Запуск::
 
     docker compose up -d
-    uvicorn backend.api:app --host 127.0.0.1 --port 8000
+    uvicorn backend.api:app --host 127.0.0.1 --port 8000 --proxy-headers
 """
 
 from __future__ import annotations
@@ -36,12 +44,16 @@ import os
 import random
 import secrets
 import time
+from collections import deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List
 from urllib.parse import quote_plus
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +65,13 @@ logger = logging.getLogger(__name__)
 
 MAX_LIMIT = 100
 _PBKDF2_ITERATIONS = 200_000
+
+#: Заголовок с токеном сессии (его выдают ``/register`` и ``/login``).
+SESSION_HEADER = "X-Session-Token"
+
+#: Ограничение попыток входа/регистрации: не более N за окно (секунды) с одного IP.
+_AUTH_LIMIT = 10
+_AUTH_WINDOW = 60.0
 
 # Лента читает только ``movies`` + предрасчитанную ``movie_stats`` (без ratings).
 FEED_MIN_RATINGS = 20
@@ -75,14 +94,23 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Rexter", version="4.0.0", lifespan=lifespan)
 
-# CORS: разрешаем запросы с фронтенда (Vite/React dev-сервер и др.).
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS нужен только если фронтенд живёт на другом origin. Штатный режим —
+# один origin: статику и API отдаёт этот же процесс, а в dev запросы идут через
+# прокси Vite. Список источников задаётся через ``REXTER_ALLOWED_ORIGINS``
+# (через запятую); по умолчанию middleware не подключается.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("REXTER_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if ALLOWED_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +131,7 @@ class RegisterResponse(BaseModel):
 
     user_id: int
     username: str
+    session_token: str
 
 
 class LoginRequest(BaseModel):
@@ -117,6 +146,7 @@ class LoginResponse(BaseModel):
 
     user_id: int
     username: str
+    session_token: str
 
 
 class UserProfile(BaseModel):
@@ -265,6 +295,60 @@ def _poster_url(title: str, poster: str | None) -> str:
     if poster:
         return poster
     return f"https://placehold.co/300x450/F3EFE9/6B4F3A/png?text={quote_plus(title)}"
+
+
+# --------------------------------------------------------------------------- #
+# Сессии и антибрутфорс
+# --------------------------------------------------------------------------- #
+_auth_attempts: dict[str, deque[float]] = {}
+
+
+def _limit_auth_attempts(request: Request) -> None:
+    """Не более ``_AUTH_LIMIT`` попыток входа/регистрации за окно с одного IP.
+
+    Счётчик живёт в памяти процесса: он защищает от перебора пароля, а не
+    заменяет собой внешний rate-limiter на уровне reverse-proxy. За Caddy нужен
+    запуск uvicorn с ``--proxy-headers``, иначе все клиенты будут с IP прокси.
+    """
+    now = time.monotonic()
+    key = request.client.host if request.client else "unknown"
+    attempts = _auth_attempts.setdefault(key, deque())
+    while attempts and now - attempts[0] > _AUTH_WINDOW:
+        attempts.popleft()
+    if len(attempts) >= _AUTH_LIMIT:
+        raise HTTPException(
+            status_code=429, detail="Слишком много попыток, попробуйте через минуту"
+        )
+    attempts.append(now)
+    if len(_auth_attempts) > 10_000:
+        stale = [
+            item
+            for item, times in _auth_attempts.items()
+            if not times or now - times[-1] > _AUTH_WINDOW
+        ]
+        for item in stale[:1000]:
+            _auth_attempts.pop(item, None)
+
+
+async def require_user(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> User:
+    """Пользователь по токену из ``X-Session-Token`` (401, если токен неверен)."""
+    token = request.headers.get(SESSION_HEADER, "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    user = await session.scalar(select(User).where(User.session_token == token))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Сессия истекла, войдите заново")
+    return user
+
+
+def ensure_owner(user: User, user_id: int) -> None:
+    """Запретить доступ к данным другого пользователя."""
+    if user.id != user_id:
+        raise HTTPException(
+            status_code=403, detail="Нет доступа к данным другого пользователя"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -418,40 +502,65 @@ async def list_movies(
 # --------------------------------------------------------------------------- #
 @app.post("/register", response_model=RegisterResponse)
 async def register(
-    payload: RegisterRequest, session: AsyncSession = Depends(get_session)
+    payload: RegisterRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
 ) -> RegisterResponse:
-    """Зарегистрировать пользователя."""
+    """Зарегистрировать пользователя и выдать токен сессии."""
+    _limit_auth_attempts(request)
     exists = await session.scalar(select(User.id).where(User.username == payload.username))
     if exists is not None:
         raise HTTPException(
             status_code=400, detail="Пользователь с таким логином уже существует"
         )
 
+    token = secrets.token_hex(16)
     user = User(
         username=payload.username,
         password_hash=hash_password(payload.password),
         age=payload.age,
         gender=payload.gender,
         occupation=payload.occupation,
-        session_token=secrets.token_hex(16),
+        session_token=token,
     )
     session.add(user)
     await session.commit()
-    return RegisterResponse(user_id=user.id, username=payload.username)
+    return RegisterResponse(
+        user_id=user.id, username=payload.username, session_token=token
+    )
 
 
 @app.post("/login", response_model=LoginResponse)
 async def login(
-    payload: LoginRequest, session: AsyncSession = Depends(get_session)
+    payload: LoginRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
 ) -> LoginResponse:
-    """Проверить пароль и вернуть ``user_id``/``username``."""
+    """Проверить пароль и выдать новый токен сессии."""
+    _limit_auth_attempts(request)
     user = await session.scalar(select(User).where(User.username == payload.username))
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
-    user.session_token = secrets.token_hex(16)
+    token = secrets.token_hex(16)
+    user.session_token = token
     await session.commit()
-    return LoginResponse(user_id=user.id, username=user.username or payload.username)
+    return LoginResponse(
+        user_id=user.id,
+        username=user.username or payload.username,
+        session_token=token,
+    )
+
+
+@app.post("/logout")
+async def logout(
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Аннулировать токен текущей сессии."""
+    user.session_token = None
+    await session.commit()
+    return {"status": "success"}
 
 
 @app.get("/user/{user_id}", response_model=UserProfile)
@@ -474,9 +583,12 @@ async def get_user(
 # --------------------------------------------------------------------------- #
 @app.post("/rate")
 async def rate(
-    payload: RateRequest, session: AsyncSession = Depends(get_session)
+    payload: RateRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     """Сохранить оценку фильма (upsert по ``(user_id, movie_id)``)."""
+    ensure_owner(user, payload.user_id)
     await _upsert_rating(
         session, payload.user_id, payload.movie_id, int(round(payload.rating))
     )
@@ -485,9 +597,12 @@ async def rate(
 
 @app.get("/user/{user_id}/history", response_model=list[HistoryEntry])
 async def get_history(
-    user_id: int, session: AsyncSession = Depends(get_session)
+    user_id: int,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
 ) -> list[HistoryEntry]:
     """История оценок пользователя (join ``ratings`` и ``movies``)."""
+    ensure_owner(user, user_id)
     rows = (
         await session.execute(
             select(Rating.movie_id, Movie.title, Rating.score)
@@ -573,9 +688,12 @@ async def api_calibration_movies(
 
 @app.post("/api/v1/rate")
 async def api_rate(
-    payload: RateV1Request, session: AsyncSession = Depends(get_session)
+    payload: RateV1Request,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict[str, str]:
     """Сохранить оценку из v1-фронтенда (upsert по ``(user_id, movie_id)``)."""
+    ensure_owner(user, payload.user_id)
     await _upsert_rating(session, payload.user_id, payload.movie_id, int(payload.rating))
     return {"status": "success"}
 
@@ -640,17 +758,20 @@ async def api_feed(
 
 @app.get("/api/v1/profile", response_model=ProfileResponse)
 async def api_profile(
-    user_id: int = 1, session: AsyncSession = Depends(get_session)
+    user_id: int | None = None,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
 ) -> ProfileResponse:
     """Профиль пользователя: статистика, любимые жанры и история оценок."""
-    user = await session.get(User, user_id)
-    name = user.username if user and user.username else "Пользователь"
+    target_id = user.id if user_id is None else user_id
+    ensure_owner(user, target_id)
+    name = user.username if user.username else "Пользователь"
 
     rows = (
         await session.execute(
             select(Movie, Rating.score)
             .join(Rating, Rating.movie_id == Movie.id)
-            .where(Rating.user_id == user_id)
+            .where(Rating.user_id == target_id)
             .order_by(func.coalesce(Rating.timestamp, 0).desc())
             .limit(20)
         )
@@ -681,16 +802,42 @@ async def api_profile(
     if not favorite_genres:
         favorite_genres = ["Фантастика", "Детективы", "Драма"]
 
-    watched_count = await _ratings_count(session, user_id)
+    watched_count = await _ratings_count(session, target_id)
 
     return ProfileResponse(
-        user_id=user_id,
+        user_id=target_id,
         name=name,
         watched_count=watched_count,
         hours=round(watched_count * 1.5),
         favorite_genres=favorite_genres,
         history=history,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Собранный фронтенд (frontend/dist) — тот же origin, без CORS
+# --------------------------------------------------------------------------- #
+DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+INDEX_FILE = DIST_DIR / "index.html"
+#: Префиксы, для которых не отдаём index.html: неизвестный API-путь должен
+#: оставаться честным 404, а не превращаться в HTML-страницу.
+_API_PREFIXES = ("api/", "docs", "redoc", "openapi.json")
+
+if (DIST_DIR / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa(full_path: str) -> FileResponse:
+    """SPA-fallback: файл из ``dist`` либо ``index.html`` для клиентских маршрутов."""
+    if INDEX_FILE.is_file():
+        if full_path:
+            candidate = (DIST_DIR / full_path).resolve()
+            if candidate.is_file() and DIST_DIR in candidate.parents:
+                return FileResponse(candidate)
+        if not full_path.startswith(_API_PREFIXES):
+            return FileResponse(INDEX_FILE)
+    raise HTTPException(status_code=404, detail="Not Found")
 
 
 if __name__ == "__main__":
