@@ -26,7 +26,7 @@ function coverFlowState(distance) {
   const d = Math.abs(distance)
 
   if (d === 0) {
-    return { scale: 1, rotateY: 0, zIndex: 30, posterDim: 0, hidden: false }
+    return { scale: 1.05, rotateY: 0, zIndex: 30, posterDim: 0, hidden: false }
   }
 
   const rotateY = (distance < 0 ? 1 : -1) * Math.min(32, 18 + d * 6)
@@ -50,7 +50,7 @@ function StarRating({ value, onChange }) {
           onClick={() => onChange(star)}
           aria-label={`Оценка ${star}`}
           className={`text-3xl leading-none transition-transform hover:scale-110 ${
-            value >= star ? 'text-honey-400' : 'text-sand-300'
+            value >= star ? 'text-[#a8927e]' : 'text-[#bfa891]'
           }`}
         >
           ★
@@ -184,6 +184,10 @@ function CarouselFeed({ userId = 1 }) {
   const active = movies[activeIndex]
   const count = movies.length
   const activeRating = active ? ratings[active.id] ?? 0 : 0
+  const activeGenres = (active?.genres ?? '')
+    .split(',')
+    .map((genre) => genre.trim())
+    .filter(Boolean)
   const activeFilterCount = [
     filters.country,
     filters.genre,
@@ -323,9 +327,9 @@ function CarouselFeed({ userId = 1 }) {
               animate={{ x: distance * SPACING, scale, rotateY, opacity: hidden ? 0 : 1 }}
               transition={{ type: 'spring', stiffness: 220, damping: 30, mass: 0.9 }}
               onClick={() => !isActive && selectIndex(index)}
-              className={`absolute left-1/2 top-1/2 overflow-hidden rounded-3xl bg-sand-200 ${
+              className={`absolute left-1/2 top-1/2 overflow-hidden rounded-[20px] bg-sand-200 ${
                 isActive
-                  ? 'cursor-default shadow-[0_28px_60px_rgba(107,79,58,0.32)]'
+                  ? 'cursor-default shadow-[0_20px_40px_rgba(44,37,31,0.15)]'
                   : 'cursor-pointer shadow-[0_16px_36px_rgba(107,79,58,0.18)]'
               }`}
               style={{
@@ -356,9 +360,9 @@ function CarouselFeed({ userId = 1 }) {
               <motion.div
                 initial={false}
                 animate={{ opacity: isActive ? 0 : 1 }}
-                className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center bg-sand-50/95 px-3 py-2.5"
+                className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center rounded-b-[16px] bg-[#e9e2d7] px-3 py-2.5"
               >
-                <span className="line-clamp-2 text-center text-base font-semibold leading-tight text-brown-700">
+                <span className="line-clamp-2 text-center text-base font-semibold leading-tight text-[#5c4e46]">
                   {movie.title}
                 </span>
               </motion.div>
@@ -370,7 +374,7 @@ function CarouselFeed({ userId = 1 }) {
 
       {/* Блок активного фильма: название, год, звёзды и «О фильме» */}
       {movies.length > 0 && (
-      <div className="mt-8 min-h-[150px] w-full max-w-[680px] text-center">
+      <div className="mt-6 min-h-[150px] w-full max-w-[680px] text-center">
         <AnimatePresence mode="wait">
           {active && (
             <motion.div
@@ -379,7 +383,7 @@ function CarouselFeed({ userId = 1 }) {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -12 }}
               transition={{ duration: 0.28, ease: 'easeOut' }}
-              className="flex w-full flex-col items-center gap-4"
+              className="flex w-full flex-col items-center gap-3"
             >
               <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-3">
                 <h1 className="text-3xl font-bold leading-tight text-brown-700">
@@ -402,6 +406,16 @@ function CarouselFeed({ userId = 1 }) {
                 </button>
               </div>
 
+              <p className="flex flex-wrap items-center justify-center gap-x-2 text-[14px] font-medium uppercase tracking-[0.06em] text-[#705d53]">
+                <span>{active.year ?? '—'}</span>
+                {activeGenres.length > 0 && (
+                  <>
+                    <span aria-hidden="true">•</span>
+                    <span>{activeGenres.join(' • ')}</span>
+                  </>
+                )}
+              </p>
+
               {/* Спойлер-фри описание: плавно выезжает сразу под кнопкой */}
               <AnimatePresence initial={false}>
                 {isDescOpen && (
@@ -420,17 +434,6 @@ function CarouselFeed({ userId = 1 }) {
                   </motion.div>
                 )}
               </AnimatePresence>
-
-              <p className="text-lg font-bold text-brown-500">
-                {active.year ?? '—'}
-              </p>
-              <p className="text-xs font-medium uppercase tracking-wider text-brown-400">
-                {active.genres
-                  ?.split(',')
-                  .map((genre) => genre.trim())
-                  .filter(Boolean)
-                  .join(' · ')}
-              </p>
 
               <StarRating value={activeRating} onChange={handleRate} />
             </motion.div>
