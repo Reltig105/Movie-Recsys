@@ -58,13 +58,39 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .database import dispose, get_session, init_db
+from .database import SessionLocal, dispose, get_session, init_db
 from .models import Movie, Rating, User, movie_stats
+from .recommender import RecommenderEngine
 
 logger = logging.getLogger(__name__)
 
+# Диагностика (загрузка эмбеддингов, Redis, холодный старт) должна попадать в
+# journalctl, а не теряться на уровне WARNING.
+logging.basicConfig(
+    level=os.getenv("REXTER_LOG_LEVEL", "INFO").upper(),
+    format="%(levelname)s | %(name)s | %(message)s",
+)
+
 MAX_LIMIT = 100
 _PBKDF2_ITERATIONS = 200_000
+
+#: Каталог с артефактами LightFM (``item_embeddings.npy``, ``faiss.index`` …).
+ARTIFACTS_DIR = Path(
+    os.getenv(
+        "REXTER_ARTIFACTS_DIR",
+        str(Path(__file__).resolve().parent.parent / "data" / "artifacts"),
+    )
+)
+
+#: Кулдаун показов. Пустая строка отключает Redis (fallback в память).
+REDIS_URL = os.getenv("REXTER_REDIS_URL", "redis://127.0.0.1:6379/0")
+COOLDOWN_TTL = int(os.getenv("REXTER_COOLDOWN_TTL", str(24 * 60 * 60)))
+
+#: Загруженный движок рекомендаций (``None`` — артефактов нет, работаем на топе).
+_ENGINE: RecommenderEngine | None = None
+
+#: Фильмы без постера: в каталоге остаются, в выдачу не попадают.
+_UNAVAILABLE: frozenset[int] = frozenset()
 
 #: Заголовок с токеном сессии (его выдают ``/register`` и ``/login``).
 SESSION_HEADER = "X-Session-Token"
@@ -86,9 +112,25 @@ RECOMMENDABLE = Movie.poster_url.is_not(None)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Создать схему на старте и закрыть пул соединений на остановке."""
+    """Создать схему, загрузить ML-артефакты и закрыть ресурсы на остановке."""
+    global _ENGINE, _UNAVAILABLE
+
     await init_db()
+    async with SessionLocal() as session:
+        posterless = await session.scalars(
+            select(Movie.id).where(Movie.poster_url.is_(None))
+        )
+        _UNAVAILABLE = frozenset(posterless.all())
+
+    try:
+        _ENGINE = await RecommenderEngine.load(ARTIFACTS_DIR, REDIS_URL, COOLDOWN_TTL)
+    except Exception:  # noqa: BLE001 — без модели сервис должен подняться
+        logger.exception("Не удалось загрузить ML-артефакты — работаем на популярном")
+        _ENGINE = None
     yield
+
+    if _ENGINE is not None:
+        await _ENGINE.cooldown.close()
     await dispose()
 
 
@@ -435,6 +477,18 @@ async def _popular_movies(
     return result[:top_k]
 
 
+async def _movies_by_ids(
+    session: AsyncSession, movie_ids: list[int]
+) -> dict[int, Movie]:
+    """Фильмы по id (только рекоменуемые) — одним запросом, с сохранением порядка."""
+    if not movie_ids:
+        return {}
+    rows = await session.scalars(
+        select(Movie).where(Movie.id.in_(movie_ids), RECOMMENDABLE)
+    )
+    return {movie.id: movie for movie in rows}
+
+
 async def _upsert_rating(
     session: AsyncSession, user_id: int, movie_id: int, score: int
 ) -> None:
@@ -463,19 +517,6 @@ async def _ratings_count(session: AsyncSession, user_id: int) -> int:
         select(func.count()).select_from(Rating).where(Rating.user_id == user_id)
     )
     return int(count or 0)
-
-
-# --------------------------------------------------------------------------- #
-# Мок-каталог (заменяется реальной ML-моделью на следующем этапе)
-# --------------------------------------------------------------------------- #
-_MOCK_CATALOG: list[Recommendation] = [
-    Recommendation(movie_id=2571, title="The Matrix", genres="Action", score=4.8),
-    Recommendation(movie_id=58559, title="The Dark Knight", genres="Crime", score=4.7),
-    Recommendation(movie_id=79132, title="Inception", genres="Sci-Fi", score=4.6),
-    Recommendation(movie_id=2959, title="Fight Club", genres="Drama", score=4.5),
-    Recommendation(movie_id=109487, title="Interstellar", genres="Sci-Fi", score=4.4),
-    Recommendation(movie_id=4226, title="Memento", genres="Mystery", score=4.2),
-]
 
 
 # --------------------------------------------------------------------------- #
@@ -643,16 +684,33 @@ async def search(
 async def recommend(
     user_id: int, top_k: int = 12, session: AsyncSession = Depends(get_session)
 ) -> list[Recommendation]:
-    """Рекомендации с автоопределением hot/cold start.
+    """Персональные рекомендации LightFM.
 
-    Есть оценки — hot start (пока мок ML); иначе cold start (SQL-топ по среднему).
+    Обученный пользователь получает топ из FAISS; новый (зарегистрировался
+    после обучения) — вектор, собранный из его оценок. Если профиля нет вовсе,
+    откатываемся на популярное (cold start).
     """
     await _fetch_user(session, user_id)
-    top_k = max(1, int(top_k))
+    top_k = max(1, min(int(top_k), MAX_LIMIT))
 
-    if await _ratings_count(session, user_id) > 0:
-        logger.info("Hot Start (SVD) для user_id=%s", user_id)
-        return _MOCK_CATALOG[: max(1, min(top_k, len(_MOCK_CATALOG)))]
+    if _ENGINE is not None:
+        items = await _ENGINE.recommend(
+            session, user_id, top_k=top_k, unavailable=_UNAVAILABLE
+        )
+        if items:
+            movies = await _movies_by_ids(session, [item.movie_id for item in items])
+            result = [
+                Recommendation(
+                    movie_id=item.movie_id,
+                    title=movies[item.movie_id].title,
+                    genres=movies[item.movie_id].genres or "",
+                    score=item.score,
+                )
+                for item in items
+                if item.movie_id in movies
+            ]
+            if result:
+                return result
 
     logger.info("Cold Start (SQL) для user_id=%s", user_id)
     rows = await _popular_movies(session, top_k=top_k, min_ratings=10)
@@ -706,14 +764,50 @@ async def api_feed(
     exclude_ids: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> list[FeedMovie]:
-    """``top_k`` фильмов для главной карусели (стабильный топ либо перемешанный).
+    """``top_k`` фильмов для главной карусели.
 
-    Читает только ``movies`` и предрасчитанную ``movie_stats`` — таблица
-    ``ratings`` (32M строк) не затрагивается вообще. ``user_id`` сохранён в
-    контракте для совместимости; уже показанные фильмы клиент скрывает через
-    ``exclude_ids``.
+    Основной путь — LightFM: вектор пользователя → FAISS → фильтрация →
+    exploit/explore. Из ``ratings`` читается только индексная выборка «что
+    пользователь уже оценил» (без агрегаций по 32M строк). Если артефактов
+    модели нет, лента собирается из ``movie_stats``, как раньше.
     """
-    top_k = max(1, int(top_k))
+    top_k = max(1, min(int(top_k), MAX_LIMIT))
+    hidden = (
+        {int(part) for part in exclude_ids.split(",") if part.strip().isdigit()}
+        if exclude_ids
+        else set()
+    )
+
+    if _ENGINE is not None:
+        items = await _ENGINE.recommend(
+            session,
+            user_id,
+            top_k=top_k,
+            exclude_ids=hidden,
+            unavailable=_UNAVAILABLE,
+            seed=seed,
+        )
+        if items:
+            movies = await _movies_by_ids(session, [item.movie_id for item in items])
+            feed = [
+                FeedMovie(
+                    id=item.movie_id,
+                    title=movies[item.movie_id].title,
+                    year=movies[item.movie_id].year,
+                    genres=movies[item.movie_id].genres or "",
+                    poster_url=_poster_url(
+                        movies[item.movie_id].title,
+                        movies[item.movie_id].poster_url,
+                    ),
+                    score=item.score,
+                    synopsis=movies[item.movie_id].synopsis or "",
+                )
+                for item in items
+                if item.movie_id in movies
+            ]
+            if feed:
+                return feed
+
     pool_size = max(top_k, FEED_POOL_SIZE)
 
     statement = (
@@ -729,8 +823,7 @@ async def api_feed(
     rows = (await session.execute(statement)).all()
     pool = [(movie, float(score), int(count)) for movie, score, count in rows]
 
-    if exclude_ids:
-        hidden = {int(part) for part in exclude_ids.split(",") if part.strip().isdigit()}
+    if hidden:
         visible = [row for row in pool if row[0].id not in hidden]
         # Если скрыто слишком много — отдаём пул без фильтра, чтобы не вернуть пусто.
         if len(visible) >= top_k:

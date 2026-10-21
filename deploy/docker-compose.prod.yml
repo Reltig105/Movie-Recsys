@@ -32,6 +32,20 @@ services:
       timeout: 5s
       retries: 10
 
+  # Кулдаун показов (24 ч). Кэш без персистентности: только localhost.
+  redis:
+    image: redis:7-alpine
+    container_name: rexter-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 volumes:
   rexter_pgdata:
     name: rexter_pgdata

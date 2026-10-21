@@ -26,12 +26,17 @@ movie-recsys/
 │   ├── load_movielens.py         # Пакетная загрузка MovieLens 32M через asyncpg COPY
 │   ├── enrich_movies.py          # Обогащение каталога TMDB (asyncio + Semaphore 40)
 │   ├── refresh_stats.py          # movie_stats (materialized view) по 32M оценок
-│   ├── ml_pipeline/              # Офлайн-матрицы для LightFM (scipy.sparse)
-│   │   └── build_features.py     # interactions.npz + item_features.npz + маппинги id
+│   ├── ml_pipeline/              # Офлайн-контур LightFM
+│   │   ├── build_features.py     # interactions.npz + item_features.npz + маппинги id
+│   │   ├── train_lightfm.py      # WARP-обучение и экспорт эмбеддингов + FAISS
+│   │   └── Dockerfile            # Linux-образ для обучения (OpenMP)
+│   ├── recommender/              # Онлайн-контур: FAISS, кулдаун, exploit/explore
+│   │   ├── engine.py             # инференс по эмбеддингам
+│   │   └── cooldown.py           # показы за 24 ч (Redis → память)
 │   ├── download_data.py          # Скачивание и распаковка MovieLens 32M
 │   └── requirements.txt          # fastapi, uvicorn, sqlalchemy, asyncpg, aiohttp, pydantic
 ├── api.py                        # Шим: реэкспорт backend.api:app
-├── docker-compose.yml            # PostgreSQL 16 (rexter_db)
+├── docker-compose.yml            # PostgreSQL 16 (rexter_db) + Redis (кулдаун)
 ├── deploy/                       # Прод: Caddyfile, systemd-юнит, compose для VPS
 ├── app.py                        # Streamlit-интерфейс (пока на mock-заглушке)
 ├── requirements.txt
@@ -175,8 +180,10 @@ python -m backend.refresh_stats
 создаёт materialized view `movie_stats(movie_id, avg_rating, ratings_count)`
 одним `GROUP BY` по 32M строк и обновляет её через
 `REFRESH MATERIALIZED VIEW CONCURRENTLY` (уникальный индекс по `movie_id`
-позволяет обновлять без блокировки чтений). `/api/v1/feed` читает только
-`movies` + `movie_stats` и к `ratings` не обращается.
+позволяет обновлять без блокировки чтений). Из `ratings` лента делает только
+индексную выборку «что пользователь уже оценил» (для исключения из выдачи),
+никаких агрегаций по 32M строк на горячем пути нет. Если артефактов модели нет,
+`/api/v1/feed` целиком собирается из `movies` + `movie_stats`, как раньше.
 
 ### Эндпоинты `backend/api.py`
 
@@ -216,13 +223,15 @@ python -m backend.refresh_stats
   работает без настройки;
 - запись оценок, профиль и история защищены токеном (`X-Session-Token`),
   вход/регистрация ограничены 10 попытками в минуту с IP;
-- `deploy/`: `docker-compose.prod.yml` (Postgres только на `127.0.0.1`),
+- `deploy/`: `docker-compose.prod.yml` (Postgres и Redis только на `127.0.0.1`),
   `Caddyfile`, `rexter.service`; секреты — в `.env` (образец `.env.example`).
 
-## 🧩 Офлайн-данные для LightFM (`backend/ml_pipeline`)
+## 🧩 Рекомендательная система: LightFM (офлайн + онлайн)
+
+### Офлайн-данные (`backend/ml_pipeline/build_features.py`)
 
 ```bash
-python -m backend.ml_pipeline.build_features            # ~4 мин, ~1 ГБ RAM
+python -m backend.ml_pipeline.build_features            # ~1–2 мин, ~1 ГБ RAM
 python -m backend.ml_pipeline.build_features --limit 2000000 --chunk-size 500000
 ```
 
@@ -231,27 +240,84 @@ python -m backend.ml_pipeline.build_features --limit 2000000 --chunk-size 500000
 
 | Файл | Что внутри |
 | --- | --- |
-| `interactions.npz` | CSR `users × movies` (200 948 × 87 585), значения — `score` (float32) |
-| `item_features.npz` | CSR `movies × features` (87 585 × 131 717), multi-hot жанров, режиссёра и актёров |
-| `user_mapping.pkl` | `{"raw_to_index": {…}, "index_to_raw": np.int32[…]}` |
-| `movie_mapping.pkl` | то же для фильмов |
-| `item_feature_names.pkl` | имена колонок `item_features` (`genre:*`, `director:*`, `cast:*`) |
+| `interactions.npz` | CSR `users × movies` (200 949 × 87 585), значения — `score` (float32) |
+| `item_features.npz` | CSR `movies × features` (87 585 × 219 302), multi-hot `movie:*`, `genre:*`, `director:*`, `cast:*` |
+| `user_mapping.pkl` / `movie_mapping.pkl` | `{"raw_to_index": {…}, "index_to_raw": np.int32[…]}` |
+| `user_ids.npy` / `movie_ids.npy` | те же биекции без pickle — их читает обучающий контейнер |
+| `item_feature_names.pkl` | имена колонок `item_features` |
 
 `movie_id` MovieLens не непрерывны (до 292 757 при 87 585 фильмах), поэтому обе
 оси перенумерованы в `0…N-1`; обратное преобразование — `index_to_raw[индекс]`.
-Жанры/режиссёр/актёры — строки через запятую из `movies`; отсутствующее значение
-превращается в признак `<unknown>` соответствующего типа, чтобы у фильма не
-осталось пустой строки признаков. NaN-ы (фильмы без режиссёра/актёров) и пустые
-жанры обрабатываются так же.
+Признаки фильма гибридные: identity `movie:<id>` (модель запоминает конкретный
+фильм — качество exploit) плюс контент `genre:*`, `director:*`, `cast:*`.
+Отсутствующее значение превращается в `<unknown>` соответствующего типа, чтобы
+у фильма не осталось пустой строки признаков.
 
 Память: 32 млн взаимодействий — три массива `int32/int32/float32` (≈ 384 МБ)
 плюс столько же на момент сборки CSR; порция pandas-фрейма (1 млн строк)
 освобождается сразу. Артефакты не коммитятся — `data/` в `.gitignore`.
 
+### Офлайн-обучение (`train_lightfm.py`)
+
+```bash
+# LightFM 1.17 — Cython-расширение 2020 года: на Windows WARP падает с access
+# violation, на Linux работает и использует все ядра через OpenMP.
+docker build -t rexter-train backend/ml_pipeline
+docker run --rm -v "%CD%:/app" rexter-train \
+    python backend/ml_pipeline/train_lightfm.py --epochs 10 --components 64
+```
+
+Что происходит:
+
+1. WARP (Weighted Approximate-Rank Pairwise) — ранжирующая функция потерь:
+   «хорошему» фильму противопоставляется случайный несмотренный, и модель
+   штрафуется, если плохой оказался выше. Оценки ниже порога
+   `--positive-threshold` (по умолчанию 4.0) в обучение не идут — иначе фильм
+   с оценкой 1.0 считался бы «положительным».
+2. Вектор фильма не хранится отдельно: `q_i = Σ e_f` по его признакам, поэтому
+   новинка без оценок получает осмысленный вектор из жанра/режиссёра/актёров.
+3. Смещения складываются так, чтобы онлайн-поиск остался одним скалярным
+   произведением: `b_i` — последняя координата вектора фильма, у пользователя
+   там `1.0`; `b_u` хранится отдельно.
+
+Экспорт в `data/artifacts/`:
+
+| Файл | Размер | Что внутри |
+| --- | --- | --- |
+| `user_embeddings.npy` | ~52 МБ | 200 949 × 65 (`p_u` + координата 1.0) |
+| `item_embeddings.npy` | ~22 МБ | 87 585 × 65 (`q_i` + `b_i`) |
+| `user_biases.npy` | <1 МБ | `b_u` |
+| `faiss.index` | ~22 МБ | `IndexFlatIP` по векторам фильмов |
+| `movie_ids.npy` / `user_ids.npy` | <1 МБ | обратный маппинг индексов в id |
+| `lightfm_meta.json` | — | d, эпохи, порог, nnz, версии, время обучения |
+
+> Перед переобучением остановите API: на Windows он держит `.npy` через `mmap`,
+> и контейнер не сможет перезаписать файлы (`OSError: Invalid argument`).
+> На Linux файлы заменяются на лету.
+
+### Онлайн-выдача (`backend/recommender`)
+
+1. **Вектор пользователя.** Для обученного — строка из `user_embeddings.npy`.
+   Для зарегистрировавшегося после обучения — взвешенное среднее векторов его
+   последних оценок (`score − 3`): холодный старт без переобучения.
+2. **Поиск.** FAISS `IndexFlatIP` возвращает 500 кандидатов за миллисекунды.
+   Внутреннее произведение, а не косинус: WARP обучал именно его, нормализация
+   уничтожила бы выученную «силу» вектора и смещение.
+3. **Фильтрация.** Убираются уже оценённые фильмы (индексная выборка по
+   `ratings`), показанные за 24 часа (Redis sorted set) и фильмы без постера.
+4. **Exploit & Explore.** 5 лучших + 2 случайных из хвоста топ-100 — выдача не
+   повторяется при каждом обновлении.
+5. **Маппинг.** `movie_index → movie_id` через `movie_ids.npy`, один
+   `SELECT` по первичному ключу `movies` — и JSON на фронтенд.
+
+Если Redis недоступен или артефактов нет, приложение не падает: кулдаун
+переходит в память процесса, а лента — на популярное из `movie_stats`.
+
 ## 🧠 Модели
 
 | Модель | Файл | Что делает |
 | --- | --- | --- |
+| **LightFM (WARP)** | `backend/ml_pipeline/train_lightfm.py` + `backend/recommender/` | Гибридные рекомендации: identity + жанры/режиссёр/актёры, FAISS-поиск, холодный старт |
 | `ItemMeanBaseline` | `ml/src/models/baseline.py` | Предсказание рейтинга по среднему фильма + fallback на глобальное среднее |
 | Content-Based | `ml/src/models/content_model.py` | TF-IDF по синопсисам, косинусное сходство, поиск похожих фильмов |
 | `SVDRecommender` | `ml/src/models/svd_model.py` | Матричная факторизация (`TruncatedSVD`, 20 компонент), top-K рекомендации, cold-start по популярности |
@@ -267,6 +333,6 @@ python -m backend.ml_pipeline.build_features --limit 2000000 --chunk-size 500000
 Полный план — в [ROADMAP.md](ROADMAP.md), проектные решения — в [DESIGN.md](DESIGN.md).
 
 Ближайшее:
-- [ ] Подключить реальную `SVDRecommender` в `app.py` вместо mock-заглушки.
-- [ ] Метрики ранжирования (`HitRate@K`, `NDCG@K`).
+- [x] LightFM (WARP) в проде: офлайн-обучение, FAISS, Redis-кулдаун, exploit/explore.
+- [ ] Метрики ранжирования (`HitRate@K`, `NDCG@K`) на отложенной по времени выборке.
 - [ ] Матричная факторизация на PyTorch и двухуровневый пайплайн (retrieval → reranking).

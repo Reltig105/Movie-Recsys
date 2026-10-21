@@ -6,6 +6,11 @@
     movies  ──► item_features.npz  (movies × features, CSR, multi-hot)
     id      ──► user_mapping.pkl / movie_mapping.pkl
 
+Матрица признаков гибридная: контент (``genre:``, ``director:``, ``cast:``) плюс
+identity-признак ``movie:<id>``. Identity даёт модели «память» о конкретном
+фильме (качество exploit-выдачи), а контентные признаки позволяют оценить
+новинку без единой оценки — их векторы просто складываются (см. LightFM).
+
 Идентификаторы MovieLens не непрерывны (``movie_id`` доходит до 292 757 при
 87 585 фильмах), поэтому обоим измерениям присваиваются внутренние индексы
 ``0…N-1``. Маппинг хранится как биекция: ``raw_to_index`` (словарь) и
@@ -169,13 +174,16 @@ def _split(value: object) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def _build_item_features(frame: pd.DataFrame) -> tuple[sparse.csr_matrix, list[str]]:
-    """Multi-hot признаков фильмов: жанры, режиссёр, актёры.
+def _build_item_features(
+    frame: pd.DataFrame, with_item_ids: bool = True
+) -> tuple[sparse.csr_matrix, list[str]]:
+    """Multi-hot признаков фильмов: id, жанры, режиссёр, актёры.
 
-    Признаки разделены префиксами (``genre:``, ``director:``, ``cast:``), чтобы
-    однофамильцы из разных колонок не склеивались. Фильм без значения получает
-    ``<unknown>`` соответствующего типа — иначе строка осталась бы нулевой и
-    LightFM не смог бы его оценить.
+    Признаки разделены префиксами (``movie:``, ``genre:``, ``director:``,
+    ``cast:``), чтобы значения из разных колонок не склеивались. Фильм без
+    значения получает ``<unknown>`` соответствующего типа — иначе строка
+    осталась бы нулевой и LightFM не смог бы его оценить. Identity-признак
+    ``movie:<id>`` есть у каждого фильма всегда.
     """
     feature_index: dict[str, int] = {}
     rows: list[int] = []
@@ -183,6 +191,8 @@ def _build_item_features(frame: pd.DataFrame) -> tuple[sparse.csr_matrix, list[s
 
     for row, record in enumerate(frame.itertuples(index=False)):
         features: dict[str, None] = {}
+        if with_item_ids:
+            features[f"movie:{record.id}"] = None
         for column, prefix in FEATURE_COLUMNS.items():
             values = _split(getattr(record, column))
             if values:
@@ -225,7 +235,12 @@ def _size_mb(path: Path) -> float:
     return path.stat().st_size / 1024 / 1024
 
 
-async def build(out_dir: Path, chunk_size: int, limit: int | None) -> int:
+async def build(
+    out_dir: Path,
+    chunk_size: int,
+    limit: int | None,
+    with_item_ids: bool = True,
+) -> int:
     """Собрать и сохранить все артефакты в ``out_dir``."""
     out_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
@@ -251,11 +266,15 @@ async def build(out_dir: Path, chunk_size: int, limit: int | None) -> int:
     if not np.array_equal(movies["id"].to_numpy(), movie_ids):
         raise RuntimeError("порядок фильмов в каталоге не совпал с movie_mapping")
 
-    item_features, feature_names = _build_item_features(movies)
+    item_features, feature_names = _build_item_features(movies, with_item_ids)
     del movies
 
     _save_mapping(out_dir / "user_mapping.pkl", user_ids)
     _save_mapping(out_dir / "movie_mapping.pkl", movie_ids)
+    # Те же биекции в .npy: обучающий контейнер живёт на numpy 1.26, а pickle
+    # из numpy 2.x он прочитать не может (модуль ``numpy._core`` переименован).
+    np.save(out_dir / "user_ids.npy", user_ids.astype(np.int32))
+    np.save(out_dir / "movie_ids.npy", movie_ids.astype(np.int32))
     sparse.save_npz(out_dir / "interactions.npz", interactions)
     sparse.save_npz(out_dir / "item_features.npz", item_features)
     with (out_dir / "item_feature_names.pkl").open("wb") as handle:
@@ -267,6 +286,8 @@ async def build(out_dir: Path, chunk_size: int, limit: int | None) -> int:
     for name in (
         "user_mapping.pkl",
         "movie_mapping.pkl",
+        "user_ids.npy",
+        "movie_ids.npy",
         "interactions.npz",
         "item_features.npz",
         "item_feature_names.pkl",
@@ -287,12 +308,19 @@ def main(argv: list[str] | None = None) -> int:
         "--chunk-size", type=int, default=DEFAULT_CHUNK, help="строк за один fetch"
     )
     parser.add_argument("--limit", type=int, help="ограничить число оценок (для проверки)")
+    parser.add_argument(
+        "--no-item-ids",
+        action="store_true",
+        help="не добавлять identity-признак movie:<id> (только контент)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
     logger.info("База данных: %s", DATABASE_URL)
     try:
-        return asyncio.run(build(args.out_dir, args.chunk_size, args.limit))
+        return asyncio.run(
+            build(args.out_dir, args.chunk_size, args.limit, not args.no_item_ids)
+        )
     except KeyboardInterrupt:
         logger.warning("Прервано пользователем")
         return 130

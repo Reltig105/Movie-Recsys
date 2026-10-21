@@ -52,6 +52,10 @@ cd /opt/rexter
 sudo -u rexter docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
 ```
 
+Эта же команда поднимает **Redis** (кулдаун показов рекомендаций, только
+`127.0.0.1:6379`) — без него приложение работает, но помнит показы лишь в
+памяти процесса.
+
 Перенос данных с локальной машины (Windows):
 
 ```powershell
@@ -75,7 +79,27 @@ sudo runuser -u rexter -- bash -c 'cd /opt/rexter && set -a && . ./.env && set +
 sudo runuser -u rexter -- bash -c 'cd /opt/rexter && set -a && . ./.env && set +a && venv/bin/python -m backend.load_movielens --reset && venv/bin/python -m backend.refresh_stats'
 ```
 
-## 6. Сборка фронтенда
+## 6. Артефакты рекомендаций
+
+Файлы модели (`data/artifacts/`, ~95 МБ) в git не хранятся — их нужно один раз
+передать на сервер с машины, где обучена LightFM:
+
+```powershell
+scp -r data/artifacts user@server:/tmp/rexter-artifacts
+```
+
+```bash
+sudo mkdir -p /opt/rexter/data
+sudo mv /tmp/rexter-artifacts /opt/rexter/data/artifacts
+sudo chown -R rexter:rexter /opt/rexter/data
+```
+
+Проверка после старта (см. лог `journalctl -u rexter`): строка
+`Рекомендации готовы: … поиск — faiss, кулдаун — redis`. Если артефактов нет,
+лента автоматически откатывается на популярное из `movie_stats` — сервис
+продолжает работать.
+
+## 7. Сборка фронтенда
 
 ```bash
 cd /opt/rexter/frontend
@@ -87,7 +111,7 @@ test -f /opt/rexter/frontend/dist/index.html && echo "dist готов"
 FastAPI раздаёт `frontend/dist` при старте: без него отдаётся только API
 (и 404 на корне). Пересобирать фронтенд после `git pull` нужно всегда.
 
-## 7. systemd
+## 8. systemd
 
 ```bash
 sudo cp /opt/rexter/deploy/rexter.service /etc/systemd/system/rexter.service
@@ -100,7 +124,7 @@ curl -s http://127.0.0.1:8000/health
 Юнит запускает uvicorn с `--proxy-headers`: без этого ограничение попыток
 входа увидит один IP (адрес Caddy) вместо реального клиента.
 
-## 8. Caddy и HTTPS
+## 9. Caddy и HTTPS
 
 ```bash
 sudo sed 's/rexter\.example\.com/ВАШ.ДОМЕН/' /opt/rexter/deploy/Caddyfile | sudo tee /etc/caddy/Caddyfile
@@ -116,7 +140,7 @@ curl -sI https://ВАШ.ДОМЕН | head -1
 curl -s https://ВАШ.ДОМЕН/health
 ```
 
-## 9. Обновление версии
+## 10. Обновление версии
 
 ```bash
 cd /opt/rexter
@@ -126,7 +150,7 @@ sudo -u rexter bash -c 'cd frontend && npm ci && npm run build'
 sudo systemctl restart rexter
 ```
 
-## 10. Бэкап
+## 11. Бэкап
 
 ```bash
 sudo docker exec rexter-postgres pg_dump -U rexter -Fc -d rexter_db > /var/backups/rexter-$(date +%F).dump
