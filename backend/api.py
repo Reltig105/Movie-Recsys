@@ -319,10 +319,25 @@ class ProfileResponse(BaseModel):
 
     user_id: int
     name: str
+    email: str | None = None
     watched_count: int
     hours: int
     favorite_genres: List[str]
     history: List[ProfileMovie]
+
+
+class PasswordChangeRequest(BaseModel):
+    """Смена пароля авторизованного пользователя."""
+
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6, max_length=128)
+
+
+class PasswordChangeResponse(BaseModel):
+    """Ответ после смены пароля: новый токен текущей сессии."""
+
+    status: str
+    session_token: str
 
 
 class RateV1Request(BaseModel):
@@ -798,6 +813,32 @@ async def api_rate(
     return {"status": "success"}
 
 
+@app.post("/api/v1/password", response_model=PasswordChangeResponse)
+async def api_change_password(
+    payload: PasswordChangeRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> PasswordChangeResponse:
+    """Сменить пароль и выдать новый токен текущей сессии.
+
+    Старый пароль нельзя показать: в базе хранится только PBKDF2-хеш.
+    Смена пароля заодно инвалидирует остальные сессии пользователя.
+    """
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Текущий пароль неверен")
+
+    if payload.current_password == payload.new_password:
+        raise HTTPException(
+            status_code=400, detail="Новый пароль должен отличаться от текущего"
+        )
+
+    token = secrets.token_hex(16)
+    user.password_hash = hash_password(payload.new_password)
+    user.session_token = token
+    await session.commit()
+    return PasswordChangeResponse(status="success", session_token=token)
+
+
 def _feed_filter_clauses(
     country: str | None,
     genre: str | None,
@@ -1101,6 +1142,7 @@ async def api_profile(
     return ProfileResponse(
         user_id=target_id,
         name=name,
+        email=user.email,
         watched_count=watched_count,
         hours=round(watched_count * 1.5),
         favorite_genres=favorite_genres,

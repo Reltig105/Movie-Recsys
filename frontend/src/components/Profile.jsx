@@ -1,8 +1,34 @@
 import { useEffect, useRef, useState } from 'react'
 import api from '../api'
+import { loadSession, saveSession } from '../session'
 import { pluralize } from '../utils/pluralize'
 
 const WATCH_GOAL = 365
+
+function extractErrorMessage(error, fallback) {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string') return detail
+  return fallback
+}
+
+function EyeIcon({ off = false }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-5 w-5"
+      aria-hidden="true"
+    >
+      <path d="M2.25 12s3.5-6.75 9.75-6.75S21.75 12 21.75 12s-3.5 6.75-9.75 6.75S2.25 12 2.25 12Z" />
+      <circle cx="12" cy="12" r="3" />
+      {off && <path d="m3 3 18 18" />}
+    </svg>
+  )
+}
 
 function Profile({ userId = 1 }) {
   const [profile, setProfile] = useState(null)
@@ -12,6 +38,14 @@ function Profile({ userId = 1 }) {
   const [rateError, setRateError] = useState(null)
   const historyRef = useRef(null)
   const [scrollState, setScrollState] = useState({ value: 0, max: 0 })
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  const [showPasswordValues, setShowPasswordValues] = useState(false)
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [passwordBusy, setPasswordBusy] = useState(false)
+  const [passwordError, setPasswordError] = useState(null)
+  const [passwordSuccess, setPasswordSuccess] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -38,6 +72,14 @@ function Profile({ userId = 1 }) {
   const percent = Math.min(100, Math.round((watched / WATCH_GOAL) * 100))
   const history = profile?.history ?? []
   const genres = profile?.favorite_genres ?? []
+  const displayName = profile?.name?.trim() || 'Пользователь'
+  const initials =
+    displayName
+      .split(/\s+/)
+      .slice(0, 2)
+      .map((part) => part[0])
+      .join('')
+      .toUpperCase() || '?'
 
   // Держим ползунок и горизонтальную прокрутку истории в синхроне.
   useEffect(() => {
@@ -144,6 +186,50 @@ function Profile({ userId = 1 }) {
     }
   }
 
+  const handleChangePassword = async (event) => {
+    event.preventDefault()
+    setPasswordError(null)
+    setPasswordSuccess(null)
+
+    if (newPassword.length < 6) {
+      setPasswordError('Новый пароль должен содержать минимум 6 символов')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Пароли не совпадают')
+      return
+    }
+
+    setPasswordBusy(true)
+    try {
+      const { data } = await api.post('/api/v1/password', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+
+      // Сервер меняет токен сессии — сохраняем его, чтобы пользователя
+      // не разлогинило после смены пароля.
+      const saved = loadSession()
+      if (saved && data?.session_token) {
+        saveSession({ ...saved, token: data.session_token })
+      }
+
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      setShowPasswordValues(false)
+      setPasswordOpen(false)
+      setPasswordSuccess('Пароль обновлён')
+    } catch (err) {
+      console.error('Не удалось изменить пароль:', err)
+      setPasswordError(
+        extractErrorMessage(err, 'Не удалось изменить пароль'),
+      )
+    } finally {
+      setPasswordBusy(false)
+    }
+  }
+
   return (
     <div className="h-full w-full overflow-y-auto px-10 py-10">
       <h1 className="mb-8 text-3xl font-semibold text-brown-700">
@@ -158,11 +244,11 @@ function Profile({ userId = 1 }) {
           <div className="rounded-3xl bg-sand-50 p-7 shadow-[0_14px_36px_rgba(107,79,58,0.10)]">
             <div className="flex items-center gap-4">
               <div className="flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-clay-400 to-brown-500 text-xl font-semibold text-white">
-                АП
+                {initials}
               </div>
               <div>
                 <div className="text-xl font-semibold text-brown-700">
-                  {profile?.name ?? 'Алексей Панин'}
+                  {displayName}
                 </div>
                 <span className="mt-1 inline-block rounded-full bg-sand-200 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-brown-500">
                   Профиль
@@ -184,6 +270,136 @@ function Profile({ userId = 1 }) {
                 />
               </div>
             </div>
+          </div>
+
+          <div className="rounded-3xl bg-sand-50 p-7 shadow-[0_14px_36px_rgba(107,79,58,0.10)]">
+            <h2 className="text-lg font-semibold text-brown-700">Аккаунт</h2>
+
+            <dl className="mt-5 space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <dt className="text-sm text-brown-500">Почта</dt>
+                <dd className="min-w-0 break-all text-right text-sm font-medium text-brown-700">
+                  {profile?.email || 'Не указана'}
+                </dd>
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <dt className="text-sm text-brown-500">Пароль</dt>
+                <dd className="flex items-center gap-2">
+                  <span
+                    className="font-mono text-sm tracking-[0.18em] text-brown-700"
+                    aria-label="Пароль скрыт"
+                  >
+                    ••••••••
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPasswordOpen((value) => !value)
+                      setPasswordError(null)
+                    }}
+                    aria-label={
+                      passwordOpen ? 'Скрыть смену пароля' : 'Показать пароль'
+                    }
+                    aria-expanded={passwordOpen}
+                    className="rounded-full p-1.5 text-brown-500 transition hover:bg-sand-200 hover:text-brown-700"
+                  >
+                    <EyeIcon off={passwordOpen} />
+                  </button>
+                </dd>
+              </div>
+            </dl>
+
+            {passwordSuccess && (
+              <p className="mt-4 text-sm text-sage-500">{passwordSuccess}</p>
+            )}
+
+            {passwordOpen && (
+              <form
+                onSubmit={handleChangePassword}
+                className="mt-5 rounded-2xl bg-sand-100 p-4"
+              >
+                <p className="text-xs leading-relaxed text-brown-500">
+                  Пароль хранится в виде необратимого хеша, поэтому показать его
+                  нельзя. Здесь можно задать новый пароль.
+                </p>
+
+                <label className="mt-4 block text-xs font-medium text-brown-600">
+                  Текущий пароль
+                  <input
+                    type={showPasswordValues ? 'text' : 'password'}
+                    value={currentPassword}
+                    onChange={(event) => setCurrentPassword(event.target.value)}
+                    autoComplete="current-password"
+                    required
+                    className="mt-1.5 w-full rounded-xl border-none bg-sand-50 px-3 py-2.5 text-sm text-brown-700 outline-none ring-1 ring-sand-200 transition focus:ring-2 focus:ring-clay-400"
+                  />
+                </label>
+
+                <label className="mt-3 block text-xs font-medium text-brown-600">
+                  Новый пароль
+                  <input
+                    type={showPasswordValues ? 'text' : 'password'}
+                    value={newPassword}
+                    onChange={(event) => setNewPassword(event.target.value)}
+                    autoComplete="new-password"
+                    minLength={6}
+                    required
+                    className="mt-1.5 w-full rounded-xl border-none bg-sand-50 px-3 py-2.5 text-sm text-brown-700 outline-none ring-1 ring-sand-200 transition focus:ring-2 focus:ring-clay-400"
+                  />
+                </label>
+
+                <label className="mt-3 block text-xs font-medium text-brown-600">
+                  Повторите новый пароль
+                  <input
+                    type={showPasswordValues ? 'text' : 'password'}
+                    value={confirmPassword}
+                    onChange={(event) => setConfirmPassword(event.target.value)}
+                    autoComplete="new-password"
+                    minLength={6}
+                    required
+                    className="mt-1.5 w-full rounded-xl border-none bg-sand-50 px-3 py-2.5 text-sm text-brown-700 outline-none ring-1 ring-sand-200 transition focus:ring-2 focus:ring-clay-400"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => setShowPasswordValues((value) => !value)}
+                  className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-brown-500 transition hover:text-brown-700"
+                >
+                  <EyeIcon off={showPasswordValues} />
+                  {showPasswordValues ? 'Скрыть введённые пароли' : 'Показать введённые пароли'}
+                </button>
+
+                {passwordError && (
+                  <p className="mt-3 text-xs text-clay-600">{passwordError}</p>
+                )}
+
+                <div className="mt-4 flex gap-2">
+                  <button
+                    type="submit"
+                    disabled={passwordBusy}
+                    className="flex-1 rounded-xl bg-clay-500 px-3 py-2.5 text-xs font-semibold text-white transition hover:bg-clay-600 disabled:opacity-60"
+                  >
+                    {passwordBusy ? 'Сохраняем…' : 'Сохранить пароль'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPasswordOpen(false)
+                      setCurrentPassword('')
+                      setNewPassword('')
+                      setConfirmPassword('')
+                      setPasswordError(null)
+                      setShowPasswordValues(false)
+                    }}
+                    className="rounded-xl bg-sand-200 px-3 py-2.5 text-xs font-semibold text-brown-700 transition hover:bg-sand-300"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
 
           <div className="rounded-3xl bg-sand-50 p-7 shadow-[0_14px_36px_rgba(107,79,58,0.10)]">
