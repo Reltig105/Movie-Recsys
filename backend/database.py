@@ -99,6 +99,17 @@ async def init_db() -> None:
         await connection.execute(
             text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS country varchar(120)")
         )
+        # Почта появилась вместе с формой регистрации. На старой базе
+        # create_all не добавит колонку, поэтому догоняем идемпотентно.
+        await connection.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email varchar(255)")
+        )
+        await connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email "
+                "ON users (email)"
+            )
+        )
 
 
 async def dispose() -> None:

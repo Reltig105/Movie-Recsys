@@ -46,6 +46,7 @@ function Onboarding({ onComplete }) {
   const [step, setStep] = useState('register')
   const [mode, setMode] = useState('register')
   const [username, setUsername] = useState('')
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [userId, setUserId] = useState(1)
   const [token, setToken] = useState(null)
@@ -96,17 +97,29 @@ function Onboarding({ onComplete }) {
   const current = movies[index]
 
   const tryAuth = async (endpoint) => {
-    const { data } = await api.post(endpoint, {
+    const payload = {
       username: username.trim(),
       password,
-    })
+    }
+    if (endpoint === '/register') {
+      payload.email = email.trim()
+    }
+    const { data } = await api.post(endpoint, payload)
     return data
   }
 
   const handleSubmitAuth = async (event) => {
     event.preventDefault()
-    if (!username.trim() || !password.trim()) {
-      setAuthError('Введите логин и пароль')
+    if (
+      !username.trim() ||
+      !password.trim() ||
+      (mode === 'register' && !email.trim())
+    ) {
+      setAuthError(
+        mode === 'register'
+          ? 'Введите логин, почту и пароль'
+          : 'Введите логин и пароль',
+      )
       return
     }
 
@@ -118,7 +131,11 @@ function Onboarding({ onComplete }) {
         auth = await tryAuth(mode === 'register' ? '/register' : '/login')
       } catch (error) {
         // Логин занят — пробуем войти, чтобы не блокировать пользователя.
-        if (mode === 'register') {
+        // Остальные ошибки (например, занятая почта) показываем как есть.
+        const detail = error?.response?.data?.detail
+        const usernameTaken =
+          typeof detail === 'string' && detail.toLowerCase().includes('логин')
+        if (mode === 'register' && usernameTaken) {
           auth = await tryAuth('/login')
         } else {
           throw error
@@ -198,6 +215,20 @@ function Onboarding({ onComplete }) {
             />
           </label>
 
+          {mode === 'register' && (
+            <label className="mt-4 block text-sm font-medium text-brown-600">
+              Почта
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="email"
+                required
+                className="mt-2 w-full rounded-2xl border-none bg-sand-100 px-4 py-3 text-[15px] text-brown-700 outline-none ring-1 ring-sand-200 transition focus:ring-2 focus:ring-clay-400"
+              />
+            </label>
+          )}
+
           <label className="mt-4 block text-sm font-medium text-brown-600">
             Пароль
             <input
@@ -240,7 +271,7 @@ function Onboarding({ onComplete }) {
             📖
           </div>
           <h1 className="mt-8 text-3xl font-semibold text-brown-700">
-            Добро пожаловать, Алексей!
+            Добро пожаловать, {username.trim() || 'друг'}!
           </h1>
           <p className="mt-4 text-[15px] leading-relaxed text-brown-500">
             Ответьте на несколько вопросов о кино — и мы соберём персональную

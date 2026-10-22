@@ -55,7 +55,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,11 +163,22 @@ if ALLOWED_ORIGINS:
 class RegisterRequest(BaseModel):
     """Данные для регистрации нового пользователя."""
 
-    username: str = Field(..., min_length=1)
+    username: str = Field(..., min_length=1, max_length=128)
+    email: str = Field(..., min_length=3, max_length=255)
     password: str = Field(..., min_length=1)
     age: int = Field(25, ge=0, le=120)
     gender: str = "unknown"
     occupation: str = "unknown"
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        """Привести почту к нижнему регистру и проверить базовый формат."""
+        email = value.strip().lower()
+        local, _, domain = email.partition("@")
+        if not local or not domain or "." not in domain:
+            raise ValueError("Некорректный адрес почты")
+        return email
 
 
 class RegisterResponse(BaseModel):
@@ -198,6 +209,7 @@ class UserProfile(BaseModel):
 
     user_id: int
     username: str | None = None
+    email: str | None = None
     age: int | None = None
     gender: str | None = None
     occupation: str | None = None
@@ -575,9 +587,18 @@ async def register(
             status_code=400, detail="Пользователь с таким логином уже существует"
         )
 
+    email_exists = await session.scalar(
+        select(User.id).where(User.email == payload.email)
+    )
+    if email_exists is not None:
+        raise HTTPException(
+            status_code=400, detail="Пользователь с такой почтой уже существует"
+        )
+
     token = secrets.token_hex(16)
     user = User(
         username=payload.username,
+        email=payload.email,
         password_hash=hash_password(payload.password),
         age=payload.age,
         gender=payload.gender,
@@ -633,6 +654,7 @@ async def get_user(
     return UserProfile(
         user_id=user.id,
         username=user.username,
+        email=user.email,
         age=user.age,
         gender=user.gender,
         occupation=user.occupation,
