@@ -55,25 +55,42 @@ function Onboarding({ onComplete }) {
   const [movies, setMovies] = useState([])
   const [index, setIndex] = useState(0)
   const [saving, setSaving] = useState(false)
+  const [calibrationError, setCalibrationError] = useState(null)
+  const [calibrationAttempt, setCalibrationAttempt] = useState(0)
 
   useEffect(() => {
-    if (step !== 'calibration' || movies.length > 0) return
+    if (step !== 'calibration') return
 
     let cancelled = false
+
     api
       .get('/api/v1/calibration-movies')
       .then(({ data }) => {
-        if (!cancelled) setMovies(Array.isArray(data) ? data : [])
+        if (cancelled) return
+        const list = Array.isArray(data) ? data : []
+        setMovies(list)
+        // Пустой каталог — это не «вечная загрузка»: показываем понятную
+        // ошибку и даём повторить запрос или продолжить без калибровки.
+        if (list.length === 0) {
+          setCalibrationError(
+            'В каталоге пока нет фильмов для калибровки. Попробуйте позже.',
+          )
+        }
       })
       .catch((error) => {
         console.error('Не удалось загрузить фильмы для калибровки:', error)
-        if (!cancelled) setMovies([])
+        if (!cancelled) {
+          setMovies([])
+          setCalibrationError(
+            'Не удалось загрузить фильмы для калибровки. Проверьте соединение и попробуйте снова.',
+          )
+        }
       })
 
     return () => {
       cancelled = true
     }
-  }, [step, movies.length])
+  }, [step, calibrationAttempt])
 
   const total = movies.length || CALIBRATION_SIZE
   const current = movies[index]
@@ -281,6 +298,34 @@ function Onboarding({ onComplete }) {
               >
                 ⏭️ Не смотрел(а) / Пропустить
               </button>
+            </div>
+          ) : calibrationError ? (
+            <div className="mt-10 flex flex-col items-center gap-5 py-8 text-center">
+              <div className="flex h-16 w-16 items-center justify-center rounded-3xl bg-sand-200 text-3xl">
+                🎬
+              </div>
+              <p className="max-w-sm text-sm leading-relaxed text-brown-500">
+                {calibrationError}
+              </p>
+              <div className="flex w-full flex-col gap-3 sm:flex-row">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCalibrationError(null)
+                    setCalibrationAttempt((value) => value + 1)
+                  }}
+                  className="flex-1 rounded-2xl bg-clay-500 px-5 py-3 text-sm font-semibold text-white transition hover:bg-clay-600"
+                >
+                  Повторить
+                </button>
+                <button
+                  type="button"
+                  onClick={goToHotStart}
+                  className="flex-1 rounded-2xl bg-sand-200 px-5 py-3 text-sm font-semibold text-brown-700 transition hover:bg-sand-300"
+                >
+                  Продолжить без калибровки
+                </button>
+              </div>
             </div>
           ) : (
             <div className="mt-10 flex flex-col items-center gap-4 py-10">
