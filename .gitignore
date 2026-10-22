@@ -12,3 +12,6 @@ ml/data/
 ml/artifacts/*.npyml/artifacts/*.npy
 ml/artifacts/*.npy
 ml/artifacts/*.npy
+
+certbot/www/*
+!certbot/www/.gitkeep

@@ -3,8 +3,11 @@
 # Run from the repository root:
 #   docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d --build
 #
-# Only Nginx publishes a host port (80). PostgreSQL, Redis, FastAPI and the
+# Only Nginx publishes host ports (80/443). PostgreSQL, Redis, FastAPI and the
 # frontend are reachable only through the internal Docker network.
+#
+# The Nginx container mounts host Let's Encrypt certificates from
+# /etc/letsencrypt and the Certbot webroot from ./certbot/www.
 
 name: rexter
 
@@ -97,8 +100,11 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "443:443"
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ../certbot/www:/var/www/certbot:ro
     depends_on:
       backend:
         condition: service_healthy
