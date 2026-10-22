@@ -9,6 +9,10 @@ const CARD_H = 390
 const SPACING = 210 // расстояние между центрами соседних карточек
 const TRACK_H = 440 // высота трека под карточки + тени
 const WHEEL_COOLDOWN = 220
+// После 20 оценок рекомендации уже считаются достаточно «разогретыми».
+const RATING_GOAL = 20
+const PROGRESS_RADIUS = 20
+const PROGRESS_CIRCUMFERENCE = 2 * Math.PI * PROGRESS_RADIUS
 
 const EMPTY_FILTERS = {
   country: '',
@@ -38,6 +42,63 @@ function coverFlowState(distance) {
     return { scale: 0.66, rotateY, zIndex: 10, posterDim: 0.62, hidden: false }
   }
   return { scale: 0.55, rotateY, zIndex: 0, posterDim: 0.8, hidden: true }
+}
+
+function RatingProgress({ ratedCount, goal = RATING_GOAL }) {
+  const percent = Math.min(100, Math.round((ratedCount / goal) * 100))
+  const offset = PROGRESS_CIRCUMFERENCE - (percent / 100) * PROGRESS_CIRCUMFERENCE
+
+  return (
+    <div className="absolute left-10 top-8 z-30 flex w-[calc(100%-21rem)] max-w-[34rem] items-center gap-4 rounded-3xl border border-sand-300/70 bg-sand-50/90 px-5 py-3 shadow-[0_8px_20px_rgba(107,79,58,0.12)] backdrop-blur">
+      <div
+        className="relative h-12 w-12 shrink-0"
+        role="img"
+        aria-label={`Оценено ${percent}% фильмов`}
+      >
+        <svg viewBox="0 0 48 48" className="h-12 w-12 -rotate-90">
+          <circle
+            cx="24"
+            cy="24"
+            r={PROGRESS_RADIUS}
+            fill="none"
+            strokeWidth="4"
+            className="text-sand-200"
+            stroke="currentColor"
+          />
+          <circle
+            cx="24"
+            cy="24"
+            r={PROGRESS_RADIUS}
+            fill="none"
+            strokeWidth="4"
+            strokeLinecap="round"
+            stroke="currentColor"
+            className="text-clay-500 transition-all duration-500"
+            style={{
+              strokeDasharray: PROGRESS_CIRCUMFERENCE,
+              strokeDashoffset: offset,
+            }}
+          />
+        </svg>
+        <span className="absolute inset-0 flex items-center justify-center text-[11px] font-bold text-brown-700">
+          {percent}%
+        </span>
+      </div>
+
+      <div className="min-w-0">
+        <p className="text-sm font-semibold leading-tight text-brown-700">
+          {ratedCount >= goal
+            ? 'Отличная выборка! Рекомендации становятся точнее'
+            : 'Оцените больше фильмов — рекомендации станут точнее'}
+        </p>
+        <p className="mt-1 text-xs leading-tight text-brown-500">
+          {ratedCount >= goal
+            ? `Оценено ${ratedCount} фильмов`
+            : `Оценено ${ratedCount} из ${goal} фильмов`}
+        </p>
+      </div>
+    </div>
+  )
 }
 
 function StarRating({ value, onChange }) {
@@ -183,6 +244,7 @@ function CarouselFeed({ userId = 1 }) {
 
   const active = movies[activeIndex]
   const count = movies.length
+  const ratedCount = Object.keys(ratings).length
   const activeRating = active ? ratings[active.id] ?? 0 : 0
   const activeGenres = (active?.genres ?? '')
     .split(',')
@@ -234,9 +296,11 @@ function CarouselFeed({ userId = 1 }) {
 
   return (
     <div
-      className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-10 py-8"
+      className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-10 pb-8 pt-24"
       onWheel={handleWheel}
     >
+      <RatingProgress ratedCount={ratedCount} />
+
       {/* Фильтры и обновление рекомендаций — сверху справа */}
       <div className="absolute right-10 top-8 z-40 flex items-center gap-2">
         <button
