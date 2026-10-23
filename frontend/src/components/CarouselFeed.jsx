@@ -110,8 +110,11 @@ function StarRating({ value, onChange }) {
           type="button"
           onClick={() => onChange(star)}
           aria-label={`Оценка ${star}`}
-          className={`text-3xl leading-none transition-transform hover:scale-110 ${
-            value >= star ? 'text-[#a8927e]' : 'text-[#bfa891]'
+          aria-pressed={value >= star}
+          className={`text-3xl leading-none transition-all duration-150 hover:scale-110 ${
+            value >= star
+              ? 'text-honey-400 drop-shadow-[0_2px_5px_rgba(224,164,88,0.35)]'
+              : 'text-sand-400 hover:text-honey-400'
           }`}
         >
           ★
