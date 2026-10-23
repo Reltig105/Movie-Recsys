@@ -13,6 +13,8 @@ const WHEEL_COOLDOWN = 220
 const RATING_GOAL = 20
 const PROGRESS_RADIUS = 20
 const PROGRESS_CIRCUMFERENCE = 2 * Math.PI * PROGRESS_RADIUS
+// Если постер не ответил за это время, не держим пользователя на загрузке.
+const POSTER_LOAD_TIMEOUT = 15_000
 
 const EMPTY_FILTERS = {
   country: '',
@@ -124,6 +126,46 @@ function StarRating({ value, onChange }) {
   )
 }
 
+function FeedLoadingScreen({ loaded = 0, total = 0 }) {
+  const percent = total > 0 ? Math.round((loaded / total) * 100) : 0
+
+  return (
+    <div
+      className="flex flex-1 flex-col items-center justify-center px-10 text-center"
+      role="status"
+      aria-live="polite"
+    >
+      <motion.div
+        animate={{ rotate: 360 }}
+        transition={{ repeat: Infinity, duration: 1.4, ease: 'linear' }}
+        className="h-16 w-16 rounded-full border-4 border-sand-200 border-t-clay-500"
+      />
+
+      <h1 className="mt-7 text-2xl font-semibold text-brown-700">
+        Подбираем фильмы
+      </h1>
+      <p className="mt-2 text-sm text-brown-400">
+        Загружаем постеры, чтобы подборка появилась сразу целиком.
+      </p>
+
+      {total > 0 && (
+        <div className="mt-7 w-64 max-w-full">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-sand-200">
+            <motion.div
+              animate={{ width: `${percent}%` }}
+              transition={{ duration: 0.25, ease: 'easeOut' }}
+              className="h-full rounded-full bg-gradient-to-r from-clay-400 to-honey-400"
+            />
+          </div>
+          <p className="mt-2 text-xs text-brown-400">
+            {loaded} из {total}
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CarouselFeed({ userId = 1 }) {
   const [movies, setMovies] = useState([])
   const [activeIndex, setActiveIndex] = useState(0)
@@ -132,6 +174,8 @@ function CarouselFeed({ userId = 1 }) {
   const [feedRequest, setFeedRequest] = useState(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
+  const [postersReady, setPostersReady] = useState(false)
+  const [posterProgress, setPosterProgress] = useState({ loaded: 0, total: 0 })
   const [filters, setFilters] = useState(EMPTY_FILTERS)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterOptions, setFilterOptions] = useState(null)
@@ -143,6 +187,10 @@ function CarouselFeed({ userId = 1 }) {
 
   useEffect(() => {
     let cancelled = false
+    setIsLoading(true)
+    setError(null)
+    setPostersReady(false)
+
     const params = { user_id: userId }
     // Параметры есть только после «Обновить»: тогда бэкенд отдаёт свежую
     // подборку, исключая уже показанные фильмы.
@@ -179,6 +227,65 @@ function CarouselFeed({ userId = 1 }) {
       cancelled = true
     }
   }, [userId, feedRequest, filters])
+
+  // Карусель показываем только после того, как браузер загрузил все постеры.
+  // Иначе карточки «проявляются» по одной с разной задержкой.
+  useEffect(() => {
+    if (movies.length === 0) {
+      setPostersReady(false)
+      setPosterProgress({ loaded: 0, total: 0 })
+      return undefined
+    }
+
+    let cancelled = false
+    let loaded = 0
+    const total = movies.length
+
+    setPostersReady(false)
+    setPosterProgress({ loaded: 0, total })
+
+    const finish = () => {
+      if (cancelled) return
+      setPostersReady(true)
+      setPosterProgress({ loaded: total, total })
+    }
+
+    const markLoaded = () => {
+      if (cancelled) return
+      loaded += 1
+      setPosterProgress({ loaded, total })
+      if (loaded >= total) finish()
+    }
+
+    const timeoutId = setTimeout(finish, POSTER_LOAD_TIMEOUT)
+    const images = movies.map((movie) => {
+      const image = new Image()
+      let settled = false
+
+      const settle = () => {
+        if (settled) return
+        settled = true
+        markLoaded()
+      }
+
+      image.onload = settle
+      image.onerror = settle
+      image.src = movie.poster_url
+      // Для картинки из кеша onload может уже не сработать.
+      if (image.complete) settle()
+
+      return image
+    })
+
+    return () => {
+      cancelled = true
+      clearTimeout(timeoutId)
+      for (const image of images) {
+        image.onload = null
+        image.onerror = null
+      }
+    }
+  }, [movies])
 
   // Справочники фильтров не зависят от выдачи: загружаем один раз.
   useEffect(() => {
@@ -354,6 +461,20 @@ function CarouselFeed({ userId = 1 }) {
     }
   }
 
+  const showLoadingScreen =
+    !error && (isLoading || (movies.length > 0 && !postersReady))
+
+  if (showLoadingScreen) {
+    return (
+      <div className="relative flex flex-1 flex-col overflow-hidden bg-sand-100">
+        <FeedLoadingScreen
+          loaded={posterProgress.loaded}
+          total={posterProgress.total}
+        />
+      </div>
+    )
+  }
+
   return (
     <div
       className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-10 pb-8 pt-24"
@@ -411,10 +532,6 @@ function CarouselFeed({ userId = 1 }) {
       />
 
       {error && <p className="mb-4 text-sm text-clay-600">{error}</p>}
-
-      {isLoading && movies.length === 0 && (
-        <p className="mb-4 text-sm text-brown-400">Подбираем фильмы…</p>
-      )}
 
       {!isLoading && !error && movies.length === 0 && (
         <div className="flex flex-col items-center gap-4 text-center">
