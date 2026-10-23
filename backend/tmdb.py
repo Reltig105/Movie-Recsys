@@ -22,7 +22,7 @@ import aiohttp
 logger = logging.getLogger("tmdb")
 
 TMDB_API_BASE = "https://api.themoviedb.org/3"
-TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w780"
+TMDB_IMAGE_BASE = "https://image.tmdb.org/t/p/w342"
 DEFAULT_LANGUAGE = "ru-RU"
 # Резервная локаль для описаний: у многих фильмов нет русского overview.
 FALLBACK_LANGUAGE = "en-US"

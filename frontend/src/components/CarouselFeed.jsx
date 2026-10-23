@@ -284,6 +284,8 @@ function CarouselFeed({ userId = 1 }) {
 
       image.onload = settle
       image.onerror = settle
+      image.decoding = 'async'
+      image.fetchPriority = 'high'
       image.src = movie.poster_url
       // Для картинки из кеша onload может уже не сработать.
       if (image.complete) settle()

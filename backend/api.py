@@ -43,6 +43,7 @@ import hmac
 import logging
 import os
 import random
+import re
 import secrets
 import time
 from collections import Counter, deque
@@ -397,9 +398,19 @@ def verify_password(password: str, stored: str | None) -> bool:
     return hmac.compare_digest(digest, expected)
 
 
+_TMDB_IMAGE_SIZE_RE = re.compile(r"/t/p/(?:original|w\d+)/")
+
+
 def _poster_url(title: str, poster: str | None) -> str:
-    """Постер фильма или плейсхолдер в тёплой палитре проекта."""
+    """Постер фильма или плейсхолдер в тёплой палитре проекта.
+
+    Карточки в интерфейсе занимают около 260 px, поэтому отдаём постер
+    шириной 342 px вместо исходных 780 px: файл примерно в 4 раза легче,
+    а на экране разница не заметна.
+    """
     if poster:
+        if "image.tmdb.org/t/p/" in poster:
+            return _TMDB_IMAGE_SIZE_RE.sub("/t/p/w342/", poster, count=1)
         return poster
     return f"https://placehold.co/300x450/F3EFE9/6B4F3A/png?text={quote_plus(title)}"
 
