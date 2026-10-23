@@ -61,7 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .countries import country_label
 from .database import SessionLocal, dispose, get_session, init_db
-from .models import Movie, Rating, User, movie_stats
+from .models import Movie, Rating, User, WatchlistItem, movie_stats
 from .recommender import RecommenderEngine
 
 logger = logging.getLogger(__name__)
@@ -314,6 +314,22 @@ class ProfileMovie(BaseModel):
     rating: float | None
 
 
+class WatchlistMovie(BaseModel):
+    """Фильм из списка «Хочу посмотреть»."""
+
+    id: int
+    title: str
+    year: int | None
+    genres: str
+    poster_url: str
+
+
+class WatchlistRequest(BaseModel):
+    """Добавление фильма в список «Хочу посмотреть»."""
+
+    movie_id: int
+
+
 class ProfileResponse(BaseModel):
     """Профиль пользователя: статистика, любимые жанры, история оценок."""
 
@@ -324,6 +340,7 @@ class ProfileResponse(BaseModel):
     hours: int
     favorite_genres: List[str]
     history: List[ProfileMovie]
+    watchlist: List[WatchlistMovie] = Field(default_factory=list)
 
 
 class PasswordChangeRequest(BaseModel):
@@ -839,6 +856,79 @@ async def api_change_password(
     return PasswordChangeResponse(status="success", session_token=token)
 
 
+async def _watchlist_movies(
+    session: AsyncSession, user_id: int
+) -> list[WatchlistMovie]:
+    """Фильмы пользователя из «Хочу посмотреть», новые сверху."""
+    movies = await session.scalars(
+        select(Movie)
+        .join(WatchlistItem, WatchlistItem.movie_id == Movie.id)
+        .where(WatchlistItem.user_id == user_id)
+        .order_by(WatchlistItem.id.desc())
+    )
+    return [
+        WatchlistMovie(
+            id=movie.id,
+            title=movie.title,
+            year=movie.year,
+            genres=movie.genres or "",
+            poster_url=_poster_url(movie.title, movie.poster_url),
+        )
+        for movie in movies
+    ]
+
+
+@app.get("/api/v1/watchlist", response_model=list[WatchlistMovie])
+async def api_watchlist(
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[WatchlistMovie]:
+    """Список фильмов «Хочу посмотреть» текущего пользователя."""
+    return await _watchlist_movies(session, user.id)
+
+
+@app.post("/api/v1/watchlist")
+async def api_watchlist_add(
+    payload: WatchlistRequest,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Добавить фильм в «Хочу посмотреть» (идемпотентно)."""
+    movie = await session.get(Movie, payload.movie_id)
+    if movie is None:
+        raise HTTPException(status_code=404, detail="Фильм не найден")
+
+    exists = await session.scalar(
+        select(WatchlistItem.id).where(
+            WatchlistItem.user_id == user.id,
+            WatchlistItem.movie_id == payload.movie_id,
+        )
+    )
+    if exists is None:
+        session.add(WatchlistItem(user_id=user.id, movie_id=payload.movie_id))
+        await session.commit()
+    return {"status": "success"}
+
+
+@app.delete("/api/v1/watchlist/{movie_id}")
+async def api_watchlist_remove(
+    movie_id: int,
+    user: User = Depends(require_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    """Убрать фильм из «Хочу посмотреть»."""
+    item = await session.scalar(
+        select(WatchlistItem).where(
+            WatchlistItem.user_id == user.id,
+            WatchlistItem.movie_id == movie_id,
+        )
+    )
+    if item is not None:
+        await session.delete(item)
+        await session.commit()
+    return {"status": "success"}
+
+
 def _feed_filter_clauses(
     country: str | None,
     genre: str | None,
@@ -1147,6 +1237,7 @@ async def api_profile(
         hours=round(watched_count * 1.5),
         favorite_genres=favorite_genres,
         history=history,
+        watchlist=await _watchlist_movies(session, target_id),
     )
 
 

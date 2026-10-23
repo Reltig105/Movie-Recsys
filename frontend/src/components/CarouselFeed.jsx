@@ -133,6 +133,9 @@ function CarouselFeed({ userId = 1 }) {
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterOptions, setFilterOptions] = useState(null)
   const [error, setError] = useState(null)
+  const [watchlistIds, setWatchlistIds] = useState(() => new Set())
+  const [watchlistBusyId, setWatchlistBusyId] = useState(null)
+  const [watchlistError, setWatchlistError] = useState(null)
   const wheelLockedAt = useRef(0)
 
   useEffect(() => {
@@ -242,9 +245,34 @@ function CarouselFeed({ userId = 1 }) {
     }
   }, [userId])
 
+  // Какие фильмы уже лежат в «Хочу посмотреть» — чтобы кнопка была в
+  // правильном состоянии и не добавляла один фильм повторно.
+  useEffect(() => {
+    let cancelled = false
+
+    api
+      .get('/api/v1/watchlist')
+      .then(({ data }) => {
+        if (cancelled) return
+        setWatchlistIds(
+          new Set(
+            (Array.isArray(data) ? data : []).map((movie) => movie.id),
+          ),
+        )
+      })
+      .catch((err) => {
+        console.error('Не удалось загрузить список «Хочу посмотреть»:', err)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [userId])
+
   const active = movies[activeIndex]
   const count = movies.length
   const ratedCount = Object.keys(ratings).length
+  const activeInWatchlist = active ? watchlistIds.has(active.id) : false
   const activeRating = active ? ratings[active.id] ?? 0 : 0
   const activeGenres = (active?.genres ?? '')
     .split(',')
@@ -291,6 +319,35 @@ function CarouselFeed({ userId = 1 }) {
       })
     } catch (err) {
       console.error('Не удалось сохранить оценку:', err)
+    }
+  }
+
+  const handleWatchlistToggle = async () => {
+    if (!active || watchlistBusyId === active.id) return
+
+    const movieId = active.id
+    const wasSaved = watchlistIds.has(movieId)
+    setWatchlistBusyId(movieId)
+    setWatchlistError(null)
+
+    try {
+      if (wasSaved) {
+        await api.delete(`/api/v1/watchlist/${movieId}`)
+      } else {
+        await api.post('/api/v1/watchlist', { movie_id: movieId })
+      }
+
+      setWatchlistIds((prev) => {
+        const next = new Set(prev)
+        if (wasSaved) next.delete(movieId)
+        else next.add(movieId)
+        return next
+      })
+    } catch (err) {
+      console.error('Не удалось обновить список «Хочу посмотреть»:', err)
+      setWatchlistError('Не удалось обновить список «Хочу посмотреть»')
+    } finally {
+      setWatchlistBusyId(null)
     }
   }
 
@@ -468,7 +525,30 @@ function CarouselFeed({ userId = 1 }) {
                     ▾
                   </motion.span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handleWatchlistToggle}
+                  disabled={watchlistBusyId === active.id}
+                  aria-pressed={activeInWatchlist}
+                  className={`inline-flex items-center gap-1.5 rounded-2xl px-5 py-2.5 text-sm font-semibold shadow-[0_12px_28px_rgba(107,79,58,0.18)] transition disabled:cursor-wait disabled:opacity-60 ${
+                    activeInWatchlist
+                      ? 'bg-clay-500 text-white hover:bg-clay-600'
+                      : 'bg-sand-50 text-brown-700 hover:bg-sand-100'
+                  }`}
+                >
+                  <span aria-hidden="true">
+                    {activeInWatchlist ? '✓' : '+'}
+                  </span>
+                  {activeInWatchlist
+                    ? 'В «Хочу посмотреть»'
+                    : 'Хочу посмотреть'}
+                </button>
               </div>
+
+              {watchlistError && (
+                <p className="text-xs text-clay-600">{watchlistError}</p>
+              )}
 
               <p className="flex flex-wrap items-center justify-center gap-x-2 text-[14px] font-medium uppercase tracking-[0.06em] text-[#705d53]">
                 <span>{active.year ?? '—'}</span>

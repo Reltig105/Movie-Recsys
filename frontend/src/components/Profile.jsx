@@ -46,6 +46,8 @@ function Profile({ userId = 1 }) {
   const [passwordBusy, setPasswordBusy] = useState(false)
   const [passwordError, setPasswordError] = useState(null)
   const [passwordSuccess, setPasswordSuccess] = useState(null)
+  const [watchlistBusyId, setWatchlistBusyId] = useState(null)
+  const [watchlistError, setWatchlistError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -72,6 +74,7 @@ function Profile({ userId = 1 }) {
   const percent = Math.min(100, Math.round((watched / WATCH_GOAL) * 100))
   const history = profile?.history ?? []
   const genres = profile?.favorite_genres ?? []
+  const watchlist = profile?.watchlist ?? []
   const displayName = profile?.name?.trim() || 'Пользователь'
   const initials =
     displayName
@@ -227,6 +230,30 @@ function Profile({ userId = 1 }) {
       )
     } finally {
       setPasswordBusy(false)
+    }
+  }
+
+  const handleWatchlistRemove = async (movieId) => {
+    setWatchlistBusyId(movieId)
+    setWatchlistError(null)
+
+    try {
+      await api.delete(`/api/v1/watchlist/${movieId}`)
+      setProfile((prev) =>
+        prev
+          ? {
+              ...prev,
+              watchlist: (prev.watchlist ?? []).filter(
+                (movie) => movie.id !== movieId,
+              ),
+            }
+          : prev,
+      )
+    } catch (err) {
+      console.error('Не удалось убрать фильм из «Хочу посмотреть»:', err)
+      setWatchlistError('Не удалось убрать фильм из списка')
+    } finally {
+      setWatchlistBusyId(null)
     }
   }
 
@@ -530,6 +557,60 @@ function Profile({ userId = 1 }) {
             )}
           </div>
         </div>
+      </div>
+
+      <div className="mt-8 rounded-3xl bg-sand-50 p-7 shadow-[0_14px_36px_rgba(107,79,58,0.10)]">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-brown-700">
+            Хочу посмотреть
+          </h2>
+          <span className="rounded-full bg-sand-200 px-3 py-1 text-xs font-semibold text-brown-600">
+            {watchlist.length}
+          </span>
+        </div>
+
+        {watchlistError && (
+          <p className="mt-3 text-sm text-clay-600">{watchlistError}</p>
+        )}
+
+        {watchlist.length === 0 ? (
+          <p className="mt-3 text-sm text-brown-400">
+            Пока пусто. Добавляйте фильмы кнопкой «Хочу посмотреть» на странице
+            рекомендаций.
+          </p>
+        ) : (
+          <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {watchlist.map((movie) => (
+              <div
+                key={movie.id}
+                className="rounded-2xl bg-sand-100 p-2 shadow-[0_8px_20px_rgba(107,79,58,0.08)]"
+              >
+                <div className="relative overflow-hidden rounded-xl bg-sand-200">
+                  <img
+                    src={movie.poster_url}
+                    alt={movie.title}
+                    className="h-[210px] w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleWatchlistRemove(movie.id)}
+                    disabled={watchlistBusyId === movie.id}
+                    aria-label={`Убрать «${movie.title}» из списка`}
+                    className="absolute right-1.5 top-1.5 flex h-7 w-7 items-center justify-center rounded-full bg-[#3e322b]/85 text-sm font-bold text-sand-50 transition hover:bg-[#3e322b] disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p className="mt-2 line-clamp-2 min-h-[2.5rem] text-[13px] font-medium leading-tight text-brown-700">
+                  {movie.title}
+                </p>
+                <p className="mt-1 text-[11px] text-brown-500">
+                  {movie.year ?? '—'}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

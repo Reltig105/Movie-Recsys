@@ -90,6 +90,23 @@ class User(Base):
         return f"<User id={self.id} username={self.username!r}>"
 
 
+class WatchlistItem(Base):
+    """Фильм, который пользователь хочет посмотреть позже."""
+
+    __tablename__ = "watchlist"
+    __table_args__ = (
+        UniqueConstraint("user_id", "movie_id", name="uq_watchlist_user_movie"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    movie_id: Mapped[int] = mapped_column(
+        ForeignKey("movies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+
 class Rating(Base):
     """Оценка фильма пользователем.
 
