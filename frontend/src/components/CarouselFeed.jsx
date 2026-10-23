@@ -126,42 +126,62 @@ function StarRating({ value, onChange }) {
   )
 }
 
-function FeedLoadingScreen({ loaded = 0, total = 0 }) {
-  const percent = total > 0 ? Math.round((loaded / total) * 100) : 0
-
+function FeedSkeleton() {
   return (
     <div
-      className="flex flex-1 flex-col items-center justify-center px-10 text-center"
+      className="flex w-full flex-col items-center"
       role="status"
-      aria-live="polite"
+      aria-label="Подбираем фильмы"
     >
-      <motion.div
-        animate={{ rotate: 360 }}
-        transition={{ repeat: Infinity, duration: 1.4, ease: 'linear' }}
-        className="h-16 w-16 rounded-full border-4 border-sand-200 border-t-clay-500"
-      />
+      <div className="relative w-full" style={{ height: TRACK_H }} aria-hidden="true">
+        {[-2, -1, 0, 1, 2].map((distance) => {
+          const { scale, rotateY, zIndex, posterDim } = coverFlowState(distance)
 
-      <h1 className="mt-7 text-2xl font-semibold text-brown-700">
-        Подбираем фильмы
-      </h1>
-      <p className="mt-2 text-sm text-brown-400">
-        Загружаем постеры, чтобы подборка появилась сразу целиком.
-      </p>
+          return (
+            <div
+              key={distance}
+              className="absolute left-1/2 top-1/2"
+              style={{
+                width: CARD_W,
+                height: CARD_H,
+                marginLeft: -CARD_W / 2,
+                marginTop: -CARD_H / 2,
+                zIndex,
+                transform: `perspective(1200px) translateX(${distance * SPACING}px) scale(${scale}) rotateY(${rotateY}deg)`,
+              }}
+            >
+              <div
+                className="h-full w-full animate-pulse rounded-[20px] bg-sand-200 shadow-[0_16px_36px_rgba(107,79,58,0.12)]"
+                style={{ animationDelay: `${Math.abs(distance) * 120}ms` }}
+              />
+              <div
+                className="pointer-events-none absolute inset-0 rounded-[20px] bg-sand-100"
+                style={{ opacity: posterDim }}
+              />
+            </div>
+          )
+        })}
+      </div>
 
-      {total > 0 && (
-        <div className="mt-7 w-64 max-w-full">
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-sand-200">
-            <motion.div
-              animate={{ width: `${percent}%` }}
-              transition={{ duration: 0.25, ease: 'easeOut' }}
-              className="h-full rounded-full bg-gradient-to-r from-clay-400 to-honey-400"
-            />
-          </div>
-          <p className="mt-2 text-xs text-brown-400">
-            {loaded} из {total}
-          </p>
+      <div
+        className="mt-6 flex min-h-[150px] w-full max-w-[680px] flex-col items-center gap-4"
+        aria-hidden="true"
+      >
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <div className="h-9 w-64 max-w-full animate-pulse rounded-2xl bg-sand-200" />
+          <div className="h-10 w-28 animate-pulse rounded-2xl bg-sand-200" />
+          <div className="h-10 w-36 animate-pulse rounded-2xl bg-sand-200" />
         </div>
-      )}
+        <div className="h-4 w-52 animate-pulse rounded-full bg-sand-200" />
+        <div className="flex gap-2">
+          {[0, 1, 2, 3, 4].map((star) => (
+            <div
+              key={star}
+              className="h-8 w-8 animate-pulse rounded-full bg-sand-200"
+            />
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
@@ -175,7 +195,6 @@ function CarouselFeed({ userId = 1 }) {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [postersReady, setPostersReady] = useState(false)
-  const [posterProgress, setPosterProgress] = useState({ loaded: 0, total: 0 })
   const [filters, setFilters] = useState(EMPTY_FILTERS)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [filterOptions, setFilterOptions] = useState(null)
@@ -228,12 +247,11 @@ function CarouselFeed({ userId = 1 }) {
     }
   }, [userId, feedRequest, filters])
 
-  // Карусель показываем только после того, как браузер загрузил все постеры.
-  // Иначе карточки «проявляются» по одной с разной задержкой.
+  // Карусель показываем только после того, как браузер загрузил все постеры:
+  // иначе карточки проявляются по одной с разной задержкой.
   useEffect(() => {
     if (movies.length === 0) {
       setPostersReady(false)
-      setPosterProgress({ loaded: 0, total: 0 })
       return undefined
     }
 
@@ -242,18 +260,14 @@ function CarouselFeed({ userId = 1 }) {
     const total = movies.length
 
     setPostersReady(false)
-    setPosterProgress({ loaded: 0, total })
 
     const finish = () => {
-      if (cancelled) return
-      setPostersReady(true)
-      setPosterProgress({ loaded: total, total })
+      if (!cancelled) setPostersReady(true)
     }
 
     const markLoaded = () => {
       if (cancelled) return
       loaded += 1
-      setPosterProgress({ loaded, total })
       if (loaded >= total) finish()
     }
 
@@ -461,24 +475,14 @@ function CarouselFeed({ userId = 1 }) {
     }
   }
 
-  const showLoadingScreen =
+  const isPreparing =
     !error && (isLoading || (movies.length > 0 && !postersReady))
-
-  if (showLoadingScreen) {
-    return (
-      <div className="relative flex flex-1 flex-col overflow-hidden bg-sand-100">
-        <FeedLoadingScreen
-          loaded={posterProgress.loaded}
-          total={posterProgress.total}
-        />
-      </div>
-    )
-  }
 
   return (
     <div
       className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-10 pb-8 pt-24"
       onWheel={handleWheel}
+      aria-busy={isPreparing}
     >
       <RatingProgress ratedCount={ratedCount} />
 
@@ -507,9 +511,11 @@ function CarouselFeed({ userId = 1 }) {
           className="inline-flex items-center gap-2 rounded-2xl border border-sand-300/70 bg-sand-50/90 px-4 py-2.5 text-sm font-semibold text-brown-700 shadow-[0_8px_20px_rgba(107,79,58,0.12)] backdrop-blur transition hover:bg-sand-100 disabled:cursor-wait disabled:opacity-60"
         >
           <motion.span
-            animate={isRefreshing ? { rotate: 360 } : { rotate: 0 }}
+            animate={
+              isRefreshing && !isPreparing ? { rotate: 360 } : { rotate: 0 }
+            }
             transition={
-              isRefreshing
+              isRefreshing && !isPreparing
                 ? { repeat: Infinity, duration: 0.9, ease: 'linear' }
                 : { duration: 0.2 }
             }
@@ -552,8 +558,10 @@ function CarouselFeed({ userId = 1 }) {
         </div>
       )}
 
+      {isPreparing && <FeedSkeleton />}
+
       {/* Горизонтальный трек Cover Flow */}
-      {movies.length > 0 && (
+      {!isPreparing && movies.length > 0 && (
       <div className="relative w-full" style={{ height: TRACK_H }}>
         {movies.map((movie, index) => {
           const distance = index - activeIndex
@@ -614,7 +622,7 @@ function CarouselFeed({ userId = 1 }) {
       )}
 
       {/* Блок активного фильма: название, год, звёзды и «О фильме» */}
-      {movies.length > 0 && (
+      {!isPreparing && movies.length > 0 && (
       <div className="mt-6 min-h-[150px] w-full max-w-[680px] text-center">
         <AnimatePresence mode="wait">
           {active && (
