@@ -56,7 +56,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .countries import country_label
@@ -322,6 +322,7 @@ class WatchlistMovie(BaseModel):
     year: int | None
     genres: str
     poster_url: str
+    rating: float | None = None
 
 
 class WatchlistRequest(BaseModel):
@@ -860,9 +861,16 @@ async def _watchlist_movies(
     session: AsyncSession, user_id: int
 ) -> list[WatchlistMovie]:
     """Фильмы пользователя из «Хочу посмотреть», новые сверху."""
-    movies = await session.scalars(
-        select(Movie)
+    rows = await session.execute(
+        select(Movie, Rating.score)
         .join(WatchlistItem, WatchlistItem.movie_id == Movie.id)
+        .outerjoin(
+            Rating,
+            and_(
+                Rating.movie_id == Movie.id,
+                Rating.user_id == user_id,
+            ),
+        )
         .where(WatchlistItem.user_id == user_id)
         .order_by(WatchlistItem.id.desc())
     )
@@ -873,8 +881,9 @@ async def _watchlist_movies(
             year=movie.year,
             genres=movie.genres or "",
             poster_url=_poster_url(movie.title, movie.poster_url),
+            rating=float(score) if score is not None else None,
         )
-        for movie in movies
+        for movie, score in rows
     ]
 
 

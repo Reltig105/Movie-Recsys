@@ -47,7 +47,9 @@ function Profile({ userId = 1 }) {
   const [passwordError, setPasswordError] = useState(null)
   const [passwordSuccess, setPasswordSuccess] = useState(null)
   const [watchlistBusyId, setWatchlistBusyId] = useState(null)
+  const [watchlistSavingId, setWatchlistSavingId] = useState(null)
   const [watchlistError, setWatchlistError] = useState(null)
+  const [watchlistRateError, setWatchlistRateError] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -159,6 +161,34 @@ function Profile({ userId = 1 }) {
     setScrollState({ value: next, max })
   }
 
+  const applyLocalRating = (movieId, value) => {
+    setProfile((prev) =>
+      prev
+        ? {
+            ...prev,
+            history: prev.history.map((movie) =>
+              movie.id === movieId ? { ...movie, rating: value } : movie,
+            ),
+            watchlist: (prev.watchlist ?? []).map((movie) =>
+              movie.id === movieId ? { ...movie, rating: value } : movie,
+            ),
+          }
+        : prev,
+    )
+  }
+
+  const refreshProfile = async () => {
+    try {
+      const { data } = await api.get('/api/v1/profile', {
+        params: { user_id: userId },
+      })
+      setProfile(data)
+    } catch (err) {
+      // Оценка уже сохранена — просто оставляем локальное состояние.
+      console.error('Не удалось обновить профиль после оценки:', err)
+    }
+  }
+
   const handleRate = async (movieId, value) => {
     setSavingId(movieId)
     setRateError(null)
@@ -170,22 +200,34 @@ function Profile({ userId = 1 }) {
         movie_id: movieId,
         rating: value,
       })
-      setProfile((prev) =>
-        prev
-          ? {
-              ...prev,
-              history: prev.history.map((movie) =>
-                movie.id === movieId ? { ...movie, rating: value } : movie,
-              ),
-            }
-          : prev,
-      )
+      applyLocalRating(movieId, value)
       setEditingId(null)
+      await refreshProfile()
     } catch (err) {
       console.error('Не удалось обновить оценку:', err)
       setRateError('Не удалось сохранить оценку')
     } finally {
       setSavingId(null)
+    }
+  }
+
+  const handleWatchlistRate = async (movieId, value) => {
+    setWatchlistSavingId(movieId)
+    setWatchlistRateError(null)
+
+    try {
+      await api.post('/rate', {
+        user_id: userId,
+        movie_id: movieId,
+        rating: value,
+      })
+      applyLocalRating(movieId, value)
+      await refreshProfile()
+    } catch (err) {
+      console.error('Не удалось оценить фильм из «Хочу посмотреть»:', err)
+      setWatchlistRateError('Не удалось сохранить оценку')
+    } finally {
+      setWatchlistSavingId(null)
     }
   }
 
@@ -573,6 +615,10 @@ function Profile({ userId = 1 }) {
           <p className="mt-3 text-sm text-clay-600">{watchlistError}</p>
         )}
 
+        {watchlistRateError && (
+          <p className="mt-3 text-sm text-clay-600">{watchlistRateError}</p>
+        )}
+
         {watchlist.length === 0 ? (
           <p className="mt-3 text-sm text-brown-400">
             Пока пусто. Добавляйте фильмы кнопкой «Хочу посмотреть» на странице
@@ -591,6 +637,11 @@ function Profile({ userId = 1 }) {
                     alt={movie.title}
                     className="h-[210px] w-full object-cover"
                   />
+                  {movie.rating != null && (
+                    <span className="absolute left-1.5 top-1.5 rounded-full bg-[#3e322b] px-2 py-0.5 text-[11px] font-semibold text-sand-50">
+                      ★ {movie.rating}
+                    </span>
+                  )}
                   <button
                     type="button"
                     onClick={() => handleWatchlistRemove(movie.id)}
@@ -607,6 +658,29 @@ function Profile({ userId = 1 }) {
                 <p className="mt-1 text-[11px] text-brown-500">
                   {movie.year ?? '—'}
                 </p>
+                <div
+                  className="mt-1.5 flex items-center justify-center gap-0.5"
+                  role="group"
+                  aria-label={`Оценка фильма ${movie.title}`}
+                >
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      type="button"
+                      onClick={() => handleWatchlistRate(movie.id, star)}
+                      disabled={watchlistSavingId === movie.id}
+                      aria-label={`Оценка ${star}`}
+                      aria-pressed={(movie.rating ?? 0) >= star}
+                      className={`text-base leading-none transition hover:text-honey-400 disabled:opacity-50 ${
+                        (movie.rating ?? 0) >= star
+                          ? 'text-honey-400'
+                          : 'text-sand-300'
+                      }`}
+                    >
+                      ★
+                    </button>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
